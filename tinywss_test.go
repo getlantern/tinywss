@@ -22,7 +22,7 @@ import (
 )
 
 func TestEchoRaw(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolRaw})
+	l, err := startEchoServer()
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -33,72 +33,17 @@ func TestEchoRaw(t *testing.T) {
 		TLSConf: &tls.Config{
 			InsecureSkipVerify: true,
 		},
-		Multiplexed: false,
 	})
 
 	for i := 0; i < 3; i++ {
 		if !_tryDialAndEcho(t, c) {
 			return
-		}
-	}
-}
-
-func TestEchoMux(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux})
-	if !assert.NoError(t, err) {
-		return
-	}
-	defer l.Close()
-
-	c := NewClient(&ClientOpts{
-		Addr: l.Addr().String(),
-		TLSConf: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		Multiplexed: true,
-	})
-
-	for i := 0; i < 3; i++ {
-		if !_tryDialAndEcho(t, c) {
-			return
-		}
-	}
-}
-
-func TestEchoRawAndMux(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux, ProtocolRaw})
-	if !assert.NoError(t, err) {
-		return
-	}
-	defer l.Close()
-
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
-	for _, c := range clients {
-		for i := 0; i < 3; i++ {
-			if !_tryDialAndEcho(t, c) {
-				return
-			}
 		}
 	}
 }
 
 func TestParallel(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux, ProtocolRaw})
+	l, err := startEchoServer()
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -106,39 +51,29 @@ func TestParallel(t *testing.T) {
 
 	addr := l.Addr().String()
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
+	c := NewClient(&ClientOpts{
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-	clients := []Client{dialerMux, dialerRaw}
 
 	wg := &sync.WaitGroup{}
 	var fails int64
 
 	for i := 0; i < 25; i++ {
-		for _, c := range clients {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if !_tryDialAndEcho(t, c) {
-					atomic.AddInt64(&fails, 1)
-				}
-			}()
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !_tryDialAndEcho(t, c) {
+				atomic.AddInt64(&fails, 1)
+			}
+		}()
 	}
 	wg.Wait()
 
 	assert.Equal(t, fails, int64(0))
 }
 
-func _tryDialAndEcho(t *testing.T, c Client) bool {
+func _tryDialAndEcho(t *testing.T, c *client) bool {
 	ctx := context.Background()
 	ctx, _ = context.WithTimeout(ctx, 1*time.Second)
 	conn, err := c.DialContext(ctx)
@@ -180,27 +115,16 @@ func TestDialTimeout1(t *testing.T) {
 
 	addr := l.Addr().String()
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
+	c := NewClient(&ClientOpts{
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
 
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
-	for _, c := range clients {
-		ctx := context.Background()
-		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
-		_, err := c.DialContext(ctx)
-		assert.NotNil(t, err)
-		assert.Equal(t, "context deadline exceeded", err.Error())
-	}
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = c.DialContext(ctx)
+	assert.NotNil(t, err)
+	assert.Equal(t, "context deadline exceeded", err.Error())
 }
 
 // tests timeout if server never replies to handshake
@@ -225,27 +149,15 @@ func TestDialTimeout2(t *testing.T) {
 
 	addr := l.Addr().String()
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
+	c := NewClient(&ClientOpts{
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
-	for _, c := range clients {
-		ctx := context.Background()
-		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
-		_, err := c.DialContext(ctx)
-		assert.NotNil(t, err)
-		assert.Equal(t, "context deadline exceeded", err.Error())
-	}
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = c.DialContext(ctx)
+	assert.NotNil(t, err)
+	assert.Equal(t, "context deadline exceeded", err.Error())
 }
 
 // tests timeout if server never replies with http response
@@ -274,27 +186,16 @@ func TestDialTimeout3(t *testing.T) {
 
 	addr := l.Addr().String()
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
+	c := NewClient(&ClientOpts{
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
 
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
-	for _, c := range clients {
-		ctx := context.Background()
-		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
-		_, err := c.DialContext(ctx)
-		assert.NotNil(t, err)
-		assert.Equal(t, "context deadline exceeded", err.Error())
-	}
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = c.DialContext(ctx)
+	assert.NotNil(t, err)
+	assert.Equal(t, "context deadline exceeded", err.Error())
 }
 
 // tests timeout if server replies but takes too long
@@ -311,7 +212,7 @@ func TestDialTimeout4(t *testing.T) {
 	defer ll.Close()
 	addr := ll.Addr().String()
 
-	tl := &listener{protocols: []string{ProtocolMux, ProtocolRaw}}
+	tl := &listener{}
 	handleRequest := func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)
 		tl.upgrade(w, r)
@@ -327,29 +228,18 @@ func TestDialTimeout4(t *testing.T) {
 	}()
 
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
+	c := NewClient(&ClientOpts{
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
 
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
-	for _, c := range clients {
-		ctx := context.Background()
-		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
-		_, err := c.DialContext(ctx)
-		if !assert.NotNil(t, err) {
-			continue
-		}
-		assert.Equal(t, "context deadline exceeded", err.Error())
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = c.DialContext(ctx)
+	if !assert.NotNil(t, err) {
+		return
 	}
+	assert.Equal(t, "context deadline exceeded", err.Error())
 }
 
 func TestBadResponse(t *testing.T) {
@@ -391,9 +281,8 @@ func TestBadResponse(t *testing.T) {
 
 	tlsConf := &tls.Config{InsecureSkipVerify: true}
 	c := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
+		Addr:    addr,
+		TLSConf: tlsConf,
 	})
 
 	ctx := context.Background()
@@ -430,14 +319,6 @@ func TestBadResponse(t *testing.T) {
 	_, err = c.DialContext(ctx)
 	assert.Equal(t, "websocket handshake: `Sec-Websocket-Accept` header is missing or invalid", err.Error())
 
-	adjustHeaders = func(h http.Header) { h.Del("Sec-Websocket-Protocol") }
-	_, err = c.DialContext(ctx)
-	assert.Equal(t, "websocket handshake: `Sec-Websocket-Protocol` header is missing or invalid ()", err.Error())
-
-	adjustHeaders = func(h http.Header) { h.Set("Sec-Websocket-Protocol", "gopher") }
-	_, err = c.DialContext(ctx)
-	assert.Equal(t, "websocket handshake: `Sec-Websocket-Protocol` header is missing or invalid (gopher)", err.Error())
-
 	statusCode = 200
 	adjustHeaders = func(h http.Header) {}
 	_, err = c.DialContext(ctx)
@@ -445,7 +326,7 @@ func TestBadResponse(t *testing.T) {
 }
 
 func TestBadRequest(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolRaw})
+	l, err := startEchoServer()
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -583,15 +464,14 @@ func generateKeyPair() (tls.Certificate, error) {
 	return tlsCert, err
 }
 
-func startEchoServer(protocols []string) (net.Listener, error) {
+func startEchoServer() (net.Listener, error) {
 	tlsConf, err := generateTLSConfig()
 	if err != nil {
 		return nil, err
 	}
 	l, err := ListenAddr(&ListenOpts{
-		Addr:      ":0",
-		TLSConf:   tlsConf,
-		Protocols: protocols,
+		Addr:    ":0",
+		TLSConf: tlsConf,
 	})
 	if err != nil {
 		return nil, err

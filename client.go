@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/getlantern/netx"
 )
@@ -28,13 +27,6 @@ type ClientOpts struct {
 	TLSConf         *tls.Config
 	Dial            DialFN // default DialWithNetx
 	MaxPendingDials int64
-
-	// Multiplex Options
-	Multiplexed       bool
-	KeepAliveInterval time.Duration
-	KeepAliveTimeout  time.Duration
-	MaxFrameSize      int
-	MaxReceiveBuffer  int
 }
 
 type client struct {
@@ -45,31 +37,24 @@ type client struct {
 	dialOrDie *dialHelper
 }
 
-// NewClient constructs a new tinywss.Client with
+// NewClient constructs a new client with
 // the specified options
-func NewClient(opts *ClientOpts) Client {
+func NewClient(opts *ClientOpts) *client {
 	dial := opts.Dial
 	if dial == nil {
 		dial = DialWithNetx
 	}
-	c := &client{
+	return &client{
 		addr:      opts.Addr,
 		tlsConf:   opts.TLSConf,
 		dial:      dial,
 		headers:   make(http.Header, 0),
 		dialOrDie: newDialHelper(opts.MaxPendingDials),
 	}
-
-	if !opts.Multiplexed {
-		c.headers.Set("Sec-Websocket-Protocol", ProtocolRaw)
-		return c
-	} else {
-		c.headers.Set("Sec-Websocket-Protocol", ProtocolMux)
-		return wrapClientSmux(c, opts)
-	}
 }
 
-// implements Client.DialContext
+// DialContext attempts to dial the configured server, returning an error if
+// the context given expires before the server can be contacted.
 func (c *client) DialContext(ctx context.Context) (net.Conn, error) {
 	return c.dialOrDie.Do(ctx, c.dialContext)
 }
@@ -194,26 +179,16 @@ func (c *client) validateResponse(res *http.Response, wskey string) error {
 		return handshakeErr("`Sec-Websocket-Accept` header is missing or invalid")
 	}
 
-	proto := res.Header.Get("Sec-Websocket-Protocol")
-	if !strings.EqualFold(proto, c.headers.Get("Sec-Websocket-Protocol")) {
-		return handshakeErr(fmt.Sprintf("`Sec-Websocket-Protocol` header is missing or invalid (%s)", proto))
-	}
-
 	return nil
 }
 
-// implements Client.SetHeaders
+// SetHeaders sets additional custom headers sent on each HTTP connection
 func (c *client) SetHeaders(h http.Header) {
 	for k, vv := range h {
 		vv2 := make([]string, len(vv))
 		copy(vv2, vv)
 		c.headers[k] = vv2
 	}
-}
-
-// implements Client.Close
-func (c *client) Close() error {
-	return nil
 }
 
 func (c *client) host() string {

@@ -75,72 +75,24 @@ func (c *client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
-	urlStr := fmt.Sprintf("https://%s/", c.addr)
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, err
-	}
-
-	host, _, err := net.SplitHostPort(c.addr)
-	if err != nil {
-		host = c.addr
-	}
-
 	tlsConf := c.tlsConf
 	if tlsConf == nil {
 		// fill SNI ServerName only if no explicit config is given.
 		tlsConf = &tls.Config{
-			ServerName: host,
+			ServerName: c.host(),
 		}
-	}
-
-	wskey, err := genKey()
-	if err != nil {
-		return nil, err
-	}
-
-	hdr := cloneHeaders(c.headers)
-	hdr.Set("Upgrade", "websocket")
-	hdr.Set("Connection", "Upgrade")
-	hdr.Set("Sec-WebSocket-Key", wskey)
-	hdr.Set("Sec-WebSocket-Version", "13")
-
-	// respect Host header if provided,
-	// but fill it into the http.Request
-	// Host field.
-	vhost := host
-	if h := hdr.Get("Host"); h != "" {
-		hdr.Del("Host")
-		vhost = h
-	}
-
-	req := &http.Request{
-		Method:     "GET",
-		URL:        u,
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     hdr,
-		Host:       vhost,
 	}
 
 	conn, err := c.dial(ctx, "tcp", c.addr)
 	if err != nil {
 		return nil, err
 	}
-
 	closeOnExit := true
 	defer func() {
 		if closeOnExit {
 			conn.Close()
 		}
 	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
 
 	tlsConn := tls.Client(conn, tlsConf)
 	conn = tlsConn
@@ -159,40 +111,95 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 	}
 
-	if err := req.Write(conn); err != nil {
+	err = c.websocketHandshake(ctx, conn)
+	if err != nil {
 		return nil, err
+	}
+
+	closeOnExit = false
+	return conn, nil
+}
+
+func (c *client) websocketHandshake(ctx context.Context, conn net.Conn) error {
+	wskey, err := genKey()
+	if err != nil {
+		return err
+	}
+
+	req, err := c.createUpgradeRequest(wskey)
+	if err != nil {
+		return err
+	}
+	if err = req.Write(conn); err != nil {
+		return err
 	}
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	default:
 	}
 
 	buf := bufio.NewReaderSize(conn, 4096)
 	res, err := http.ReadResponse(buf, req)
 	if err != nil {
+		return err
+	}
+	return c.validateResponse(res, wskey)
+}
+
+func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
+	urlStr := fmt.Sprintf("https://%s/", c.addr)
+	u, err := url.Parse(urlStr)
+	if err != nil {
 		return nil, err
 	}
+
+	hdr := cloneHeaders(c.headers)
+	hdr.Set("Upgrade", "websocket")
+	hdr.Set("Connection", "Upgrade")
+	hdr.Set("Sec-WebSocket-Key", wskey)
+	hdr.Set("Sec-WebSocket-Version", "13")
+
+	// respect Host header if provided,
+	// but fill it into the http.Request
+	// Host field.
+	vhost := c.host()
+	if h := hdr.Get("Host"); h != "" {
+		hdr.Del("Host")
+		vhost = h
+	}
+
+	return &http.Request{
+		Method:     "GET",
+		URL:        u,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     hdr,
+		Host:       vhost,
+	}, nil
+}
+
+func (c *client) validateResponse(res *http.Response, wskey string) error {
 	if res.StatusCode != 101 {
-		return nil, handshakeErr(fmt.Sprintf("unexpected status %d", res.StatusCode))
+		return handshakeErr(fmt.Sprintf("unexpected status %d", res.StatusCode))
 	}
 	if !headerHasValue(res.Header, "Connection", "upgrade") {
-		return nil, handshakeErr("`Connection` header is missing or invalid")
+		return handshakeErr("`Connection` header is missing or invalid")
 	}
 	if !strings.EqualFold(res.Header.Get("Upgrade"), "websocket") {
-		return nil, handshakeErr("`Upgrade` header is missing or invalid")
+		return handshakeErr("`Upgrade` header is missing or invalid")
 	}
 	if !strings.EqualFold(res.Header.Get("Sec-Websocket-Accept"), acceptForKey(wskey)) {
-		return nil, handshakeErr("`Sec-Websocket-Accept` header is missing or invalid")
+		return handshakeErr("`Sec-Websocket-Accept` header is missing or invalid")
 	}
 
 	proto := res.Header.Get("Sec-Websocket-Protocol")
 	if !strings.EqualFold(proto, c.headers.Get("Sec-Websocket-Protocol")) {
-		return nil, handshakeErr(fmt.Sprintf("`Sec-Websocket-Protocol` header is missing or invalid (%s)", proto))
+		return handshakeErr(fmt.Sprintf("`Sec-Websocket-Protocol` header is missing or invalid (%s)", proto))
 	}
 
-	closeOnExit = false
-	return conn, nil
+	return nil
 }
 
 // implements Client.SetHeaders
@@ -207,4 +214,12 @@ func (c *client) SetHeaders(h http.Header) {
 // implements Client.Close
 func (c *client) Close() error {
 	return nil
+}
+
+func (c *client) host() string {
+	host, _, err := net.SplitHostPort(c.addr)
+	if err != nil {
+		return c.addr
+	}
+	return host
 }

@@ -1,33 +1,20 @@
 package tinywss
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/getlantern/netx"
 )
-
-// DialFN is the type used for providing a custom dialer to tinywss
-type DialFN func(ctx context.Context, network, addr string) (net.Conn, error)
-
-// DialFN instances that can be provided
-var netDialer net.Dialer
-var DialWithNet = netDialer.DialContext
-var DialWithNetx = netx.DialContext
 
 // Configuration options for NewClient
 type ClientOpts struct {
-	Addr            string
-	TLSConf         *tls.Config
-	Dial            DialFN // default DialWithNetx
+	URL             string
 	MaxPendingDials int64
+	RoundTrip       RoundTripHijacker
 
 	// Multiplex Options
 	Multiplexed       bool
@@ -38,9 +25,8 @@ type ClientOpts struct {
 }
 
 type client struct {
-	addr      string
-	tlsConf   *tls.Config
-	dial      DialFN
+	url       string
+	rt        RoundTripHijacker
 	headers   http.Header // Sent with each https connection
 	dialOrDie *dialHelper
 }
@@ -48,14 +34,14 @@ type client struct {
 // NewClient constructs a new tinywss.Client with
 // the specified options
 func NewClient(opts *ClientOpts) Client {
-	dial := opts.Dial
-	if dial == nil {
-		dial = DialWithNetx
+
+	rt := opts.RoundTrip
+	if rt == nil {
+		rt = NewRoundTripper(nil)
 	}
 	c := &client{
-		addr:      opts.Addr,
-		tlsConf:   opts.TLSConf,
-		dial:      dial,
+		url:       opts.URL,
+		rt:        rt,
 		headers:   make(http.Header, 0),
 		dialOrDie: newDialHelper(opts.MaxPendingDials),
 	}
@@ -75,15 +61,16 @@ func (c *client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
-	tlsConf := c.tlsConf
-	if tlsConf == nil {
-		// fill SNI ServerName only if no explicit config is given.
-		tlsConf = &tls.Config{
-			ServerName: c.host(),
-		}
+	wskey, err := genKey()
+	if err != nil {
+		return nil, err
 	}
 
-	conn, err := c.dial(ctx, "tcp", c.addr)
+	req, err := c.createUpgradeRequest(wskey)
+	if err != nil {
+		return nil, err
+	}
+	res, conn, err := c.rt.RoundTripHijack(req)
 	if err != nil {
 		return nil, err
 	}
@@ -94,24 +81,13 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 	}()
 
-	tlsConn := tls.Client(conn, tlsConf)
-	conn = tlsConn
-	if err := tlsConn.Handshake(); err != nil {
-		return nil, err
-	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 
-	if !tlsConf.InsecureSkipVerify {
-		if err := tlsConn.VerifyHostname(tlsConf.ServerName); err != nil {
-			return nil, err
-		}
-	}
-
-	err = c.websocketHandshake(ctx, conn)
+	err = c.validateResponse(res, wskey)
 	if err != nil {
 		return nil, err
 	}
@@ -120,36 +96,9 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-func (c *client) websocketHandshake(ctx context.Context, conn net.Conn) error {
-	wskey, err := genKey()
-	if err != nil {
-		return err
-	}
-
-	req, err := c.createUpgradeRequest(wskey)
-	if err != nil {
-		return err
-	}
-	if err = req.Write(conn); err != nil {
-		return err
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	buf := bufio.NewReaderSize(conn, 4096)
-	res, err := http.ReadResponse(buf, req)
-	if err != nil {
-		return err
-	}
-	return c.validateResponse(res, wskey)
-}
-
 func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
-	urlStr := fmt.Sprintf("https://%s/", c.addr)
-	u, err := url.Parse(urlStr)
+
+	u, err := url.Parse(c.url)
 	if err != nil {
 		return nil, err
 	}
@@ -160,15 +109,6 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 	hdr.Set("Sec-WebSocket-Key", wskey)
 	hdr.Set("Sec-WebSocket-Version", "13")
 
-	// respect Host header if provided,
-	// but fill it into the http.Request
-	// Host field.
-	vhost := c.host()
-	if h := hdr.Get("Host"); h != "" {
-		hdr.Del("Host")
-		vhost = h
-	}
-
 	return &http.Request{
 		Method:     "GET",
 		URL:        u,
@@ -176,7 +116,6 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header:     hdr,
-		Host:       vhost,
 	}, nil
 }
 
@@ -214,12 +153,4 @@ func (c *client) SetHeaders(h http.Header) {
 // implements Client.Close
 func (c *client) Close() error {
 	return nil
-}
-
-func (c *client) host() string {
-	host, _, err := net.SplitHostPort(c.addr)
-	if err != nil {
-		return c.addr
-	}
-	return host
 }

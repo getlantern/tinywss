@@ -28,13 +28,7 @@ func TestEchoRaw(t *testing.T) {
 	}
 	defer l.Close()
 
-	c := NewClient(&ClientOpts{
-		Addr: l.Addr().String(),
-		TLSConf: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		Multiplexed: false,
-	})
+	c := testClientFor(l, false)
 
 	for i := 0; i < 3; i++ {
 		if !_tryDialAndEcho(t, c) {
@@ -50,13 +44,7 @@ func TestEchoMux(t *testing.T) {
 	}
 	defer l.Close()
 
-	c := NewClient(&ClientOpts{
-		Addr: l.Addr().String(),
-		TLSConf: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		Multiplexed: true,
-	})
+	c := testClientFor(l, true)
 
 	for i := 0; i < 3; i++ {
 		if !_tryDialAndEcho(t, c) {
@@ -72,22 +60,10 @@ func TestEchoRawAndMux(t *testing.T) {
 	}
 	defer l.Close()
 
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
 	for _, c := range clients {
 		for i := 0; i < 3; i++ {
 			if !_tryDialAndEcho(t, c) {
@@ -104,20 +80,10 @@ func TestParallel(t *testing.T) {
 	}
 	defer l.Close()
 
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-	clients := []Client{dialerMux, dialerRaw}
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
 
 	wg := &sync.WaitGroup{}
 	var fails int64
@@ -178,22 +144,10 @@ func TestDialTimeout1(t *testing.T) {
 	}
 	defer l.Close()
 
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
 	for _, c := range clients {
 		ctx := context.Background()
 		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
@@ -223,21 +177,10 @@ func TestDialTimeout2(t *testing.T) {
 		}
 	}()
 
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
 
 	for _, c := range clients {
 		ctx := context.Background()
@@ -272,22 +215,10 @@ func TestDialTimeout3(t *testing.T) {
 		}
 	}()
 
-	addr := l.Addr().String()
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
-
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
 	for _, c := range clients {
 		ctx := context.Background()
 		ctx, _ = context.WithTimeout(ctx, 100*time.Millisecond)
@@ -326,20 +257,10 @@ func TestDialTimeout4(t *testing.T) {
 		srv.ServeTLS(ll, "", "")
 	}()
 
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	dialerMux := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: true,
-	})
-
-	dialerRaw := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
-
-	clients := []Client{dialerMux, dialerRaw}
+	clients := []Client{
+		testClientFor(ll, true),
+		testClientFor(ll, false),
+	}
 
 	for _, c := range clients {
 		ctx := context.Background()
@@ -389,12 +310,7 @@ func TestBadResponse(t *testing.T) {
 		srv.ServeTLS(ll, "", "")
 	}()
 
-	tlsConf := &tls.Config{InsecureSkipVerify: true}
-	c := NewClient(&ClientOpts{
-		Addr:        addr,
-		TLSConf:     tlsConf,
-		Multiplexed: false,
-	})
+	c := testClientFor(ll, false)
 
 	ctx := context.Background()
 
@@ -611,4 +527,15 @@ func startEchoServer(protocols []string) (net.Listener, error) {
 	}()
 
 	return l, nil
+}
+
+func testClientFor(l net.Listener, multiplexed bool) Client {
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	return NewClient(&ClientOpts{
+		URL:         fmt.Sprintf("wss://%s", l.Addr().String()),
+		RoundTrip:   NewRoundTripper(tlsConf),
+		Multiplexed: multiplexed,
+	})
 }

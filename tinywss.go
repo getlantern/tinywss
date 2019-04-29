@@ -78,3 +78,9 @@ type Client interface {
 	// Close shuts down any resources associated with the client
 	Close() error
 }
+
+// This interface is used to make the http upgrade request and hijack the
+// the underlying connection.
+type RoundTripHijacker interface {
+	RoundTripHijack(*http.Request) (*http.Response, net.Conn, error)
+}

@@ -52,13 +52,13 @@ func listenAddr(opts *ListenOpts) (*listener, error) {
 		handshakeTimeout = defaultHandshakeTimeout
 	}
 
+	var err error
 	ll := opts.Listener
 	if ll == nil {
-		ln, err := net.Listen("tcp", opts.Addr)
+		ll, err = net.Listen("tcp", opts.Addr)
 		if err != nil {
 			return nil, err
 		}
-		ll = tcpKeepAliveListener{ln.(*net.TCPListener)}
 	}
 
 	l := &listener{

@@ -535,7 +535,7 @@ func testClientFor(l net.Listener, multiplexed bool) Client {
 	}
 	return NewClient(&ClientOpts{
 		URL:         fmt.Sprintf("wss://%s", l.Addr().String()),
-		RoundTrip:   NewRoundTripper(tlsConf),
+		RoundTrip:   NewRoundTripper(TLSDialFN(tlsConf)),
 		Multiplexed: multiplexed,
 	})
 }

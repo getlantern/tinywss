@@ -21,8 +21,8 @@ type ListenOpts struct {
 	KeyFile          string
 	TLSConf          *tls.Config
 	HandshakeTimeout time.Duration
-	Listener         net.Listener
-	Protocols        []string // allowed protocols
+	Listener         net.Listener // wrap this listener if provided
+	Protocols        []string     // allowed protocols
 
 	// Multiplex options
 	KeepAliveInterval time.Duration
@@ -59,6 +59,8 @@ func listenAddr(opts *ListenOpts) (*listener, error) {
 		if err != nil {
 			return nil, err
 		}
+	} else if opts.Addr != "" {
+		return nil, fmt.Errorf("tinywss: cannot specify address and wrapped listener")
 	}
 
 	l := &listener{

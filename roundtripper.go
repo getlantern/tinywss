@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/getlantern/tlsdialer"
+	"github.com/getlantern/netx"
 )
 
 type DialFN func(network, addr string) (net.Conn, error)
@@ -15,7 +15,12 @@ var defaultDial DialFN = TLSDialFN(nil)
 
 func TLSDialFN(tlsConf *tls.Config) DialFN {
 	return func(network, addr string) (net.Conn, error) {
-		return tlsdialer.Dial(network, addr, true, tlsConf)
+		conn, err := netx.Dial(network, addr)
+		tlsConn := tls.Client(conn, tlsConf)
+		if err = tlsConn.Handshake(); err != nil {
+			return nil, err
+		}
+		return tlsConn, nil
 	}
 }
 

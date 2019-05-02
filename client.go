@@ -99,6 +99,9 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 
 	u, err := url.Parse(c.url)
+	if strings.EqualFold(u.Scheme, "wss") {
+		u.Scheme = "https"
+	}
 	if err != nil {
 		return nil, err
 	}

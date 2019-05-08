@@ -50,12 +50,11 @@ func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
-
 	c.mx.Lock()
 	defer c.mx.Unlock()
 
 	if c.closed {
-		return nil, ErrDialerClosed
+		return nil, ErrClientClosed
 	}
 	var err error
 	for tries := 0; tries < 2; tries++ {
@@ -80,10 +79,10 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 // implements Client.Close
 func (c *smuxClient) Close() error {
 	c.mx.Lock()
+	c.closed = true
 	if c.session != nil {
 		c.session.Close()
 		c.session = nil
-		c.closed = true
 	}
 	c.mx.Unlock()
 	return nil
@@ -164,11 +163,12 @@ func (l *smuxListener) handleConn(conn net.Conn) {
 	wconn, ok := conn.(*wsConn)
 	if !ok {
 		log.Errorf("not handling unexpected connection type")
+		conn.Close()
 		return
 	}
 	atomic.AddInt64(&l.numConnections, 1)
 
-	if strings.EqualFold(wconn.Protocol, ProtocolMux) {
+	if strings.EqualFold(wconn.protocol, ProtocolMux) {
 		ops.Go(func() {
 			l.handleSession(wconn)
 			atomic.AddInt64(&l.numConnections, -1)
@@ -199,7 +199,7 @@ func (l *smuxListener) handleSession(conn *wsConn) {
 		atomic.AddInt64(&l.numVirtualConnections, 1)
 		l.connections <- &wsConn{
 			Conn:     stream,
-			Protocol: ProtocolMux,
+			protocol: ProtocolMux,
 			onClose: func() {
 				atomic.AddInt64(&l.numVirtualConnections, -1)
 			},

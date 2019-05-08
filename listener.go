@@ -21,8 +21,13 @@ type ListenOpts struct {
 	KeyFile          string
 	TLSConf          *tls.Config
 	HandshakeTimeout time.Duration
-	Listener         net.Listener // wrap this listener if provided
-	Protocols        []string     // allowed protocols
+	Protocols        []string // allowed protocols
+
+	// If provided, this listener is used instead of starting
+	// a TLS listener using the tls configuration specified.
+	// Addr, CertFile, KeyFile and TLSConf are ignored if this
+	// is given.
+	Listener net.Listener
 
 	// Multiplex options
 	KeepAliveInterval time.Duration
@@ -55,7 +60,7 @@ func listenAddr(opts *ListenOpts) (*listener, error) {
 	var err error
 	ll := opts.Listener
 	if ll == nil {
-		ll, err = net.Listen("tcp", opts.Addr)
+		ll, err = newTLSListener(opts)
 		if err != nil {
 			return nil, err
 		}
@@ -80,13 +85,12 @@ func listenAddr(opts *ListenOpts) (*listener, error) {
 	copy(l.protocols, protos)
 
 	l.srv = &http.Server{
-		Addr:      opts.Addr,
-		Handler:   http.HandlerFunc(l.handleRequest),
-		TLSConfig: opts.TLSConf,
+		Addr:    opts.Addr,
+		Handler: http.HandlerFunc(l.handleRequest),
 	}
 
 	ops.Go(func() {
-		l.listen(opts.CertFile, opts.KeyFile)
+		l.listen()
 	})
 	return l, nil
 }
@@ -103,8 +107,8 @@ type listener struct {
 	handshakeTimeout time.Duration
 }
 
-func (l *listener) listen(certFile, keyFile string) {
-	err := l.srv.ServeTLS(l.innerListener, certFile, keyFile)
+func (l *listener) listen() {
+	err := l.srv.Serve(l.innerListener)
 	if err != http.ErrServerClosed {
 		log.Errorf("tinywss listener: %s", err)
 	}
@@ -143,16 +147,19 @@ func (l *listener) Addr() net.Addr {
 }
 
 func (l *listener) handleRequest(w http.ResponseWriter, r *http.Request) {
-	c, err := l.upgrade(w, r)
+	conn, err := l.upgrade(w, r)
 	if err != nil {
+		if conn != nil {
+			conn.Close()
+		}
 		if _, ok := err.(HandshakeError); ok {
-			log.Debugf("upgrading request: %s", err)
+			log.Debugf("error upgrading request: %s", err)
 		} else {
-			log.Errorf("upgrading request: %s", err)
+			log.Errorf("error upgrading request: %s", err)
 		}
 		return
 	}
-	l.connections <- c
+	l.connections <- conn
 }
 
 func (l *listener) upgrade(w http.ResponseWriter, r *http.Request) (net.Conn, error) {
@@ -194,12 +201,10 @@ func (l *listener) upgrade(w http.ResponseWriter, r *http.Request) (net.Conn, er
 	}
 	err = conn.SetDeadline(time.Time{})
 	if err != nil {
-		conn.Close()
-		return nil, err
+		return conn, err
 	}
 	if buf.Reader.Buffered() > 0 {
-		conn.Close()
-		return nil, handshakeErr("request payload before handshake")
+		return conn, handshakeErr("request payload before handshake")
 	}
 
 	hdr := make(http.Header, 0)
@@ -216,8 +221,7 @@ func (l *listener) upgrade(w http.ResponseWriter, r *http.Request) (net.Conn, er
 		conn.SetWriteDeadline(time.Now().Add(l.handshakeTimeout))
 	}
 	if _, err = conn.Write(res.Bytes()); err != nil {
-		conn.Close()
-		return nil, err
+		return conn, err
 	}
 	if l.handshakeTimeout > 0 {
 		conn.SetWriteDeadline(time.Time{})
@@ -233,4 +237,36 @@ func (l *listener) supportsProtocol(p string) bool {
 		}
 	}
 	return false
+}
+
+// default inner listener
+func newTLSListener(opts *ListenOpts) (net.Listener, error) {
+	l, err := net.Listen("tcp", opts.Addr)
+	if err != nil {
+		return nil, err
+	}
+
+	var tlsConf *tls.Config
+	if opts.TLSConf == nil {
+		tlsConf = &tls.Config{}
+	} else {
+		tlsConf = opts.TLSConf.Clone()
+	}
+
+	if !strSliceContains(tlsConf.NextProtos, "http/1.1") {
+		tlsConf.NextProtos = append(tlsConf.NextProtos, "http/1.1")
+	}
+
+	hasCert := len(tlsConf.Certificates) > 0 || tlsConf.GetCertificate != nil
+	if !hasCert || opts.CertFile != "" || opts.KeyFile != "" {
+		var err error
+		tlsConf.Certificates = make([]tls.Certificate, 1)
+		tlsConf.Certificates[0], err = tls.LoadX509KeyPair(opts.CertFile, opts.KeyFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tl := tls.NewListener(l, tlsConf)
+	return tl, nil
 }

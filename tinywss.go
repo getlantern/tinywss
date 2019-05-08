@@ -21,16 +21,20 @@ import (
 )
 
 var (
-	ErrListenerClosed       = errors.New("listener closed")
-	ErrDialerClosed         = errors.New("dialer closed")
+	// ErrListenerClosed is the error returned if listener is used after closed
+	ErrListenerClosed = errors.New("listener closed")
+	// ErrDialerClosed is the error returned if client is used after closed
+	ErrClientClosed         = errors.New("client closed")
 	log                     = golog.LoggerFor("tinywss")
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultProtocols        = []string{ProtocolMux, ProtocolRaw}
 )
 
 const (
-	ProtocolRaw            = "tinywss-raw"  // raw connection
-	ProtocolMux            = "tinywss-smux" // multiplexed protocol
+	// ProtocolRaw specifies a raw (not multiplexed) connection
+	ProtocolRaw = "tinywss-raw"
+	// ProtocolMux specifies a multiplexed connection
+	ProtocolMux            = "tinywss-smux"
 	defaultMaxPendingDials = 1024
 )
 
@@ -49,7 +53,7 @@ func handshakeErr(message string) error {
 
 type wsConn struct {
 	net.Conn
-	Protocol string
+	protocol string
 	onClose  func()
 }
 
@@ -79,8 +83,8 @@ type Client interface {
 	Close() error
 }
 
-// This interface is used to make the http upgrade request and hijack the
-// the underlying connection.
+// RoundTripHijacker is the interface used by the Client to make the
+// HTTP upgrade request and hijack the the underlying connection.
 type RoundTripHijacker interface {
 	RoundTripHijack(*http.Request) (*http.Response, net.Conn, error)
 }

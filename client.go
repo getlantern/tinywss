@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Configuration options for NewClient
+// ClientOpts contains configuration options for NewClient
 type ClientOpts struct {
 	URL             string
 	MaxPendingDials int64
@@ -70,6 +70,8 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
+
 	res, conn, err := c.rt.RoundTripHijack(req)
 	if err != nil {
 		return nil, err
@@ -146,11 +148,7 @@ func (c *client) validateResponse(res *http.Response, wskey string) error {
 
 // implements Client.SetHeaders
 func (c *client) SetHeaders(h http.Header) {
-	for k, vv := range h {
-		vv2 := make([]string, len(vv))
-		copy(vv2, vv)
-		c.headers[k] = vv2
-	}
+	copyHeaders(c.headers, h)
 }
 
 // implements Client.Close

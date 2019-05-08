@@ -31,19 +31,32 @@ func genKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(p), nil
 }
 
-func cloneHeaders(h http.Header) http.Header {
-	h2 := make(http.Header, len(h))
-	for k, vv := range h {
+func cloneHeaders(src http.Header) http.Header {
+	dst := make(http.Header, len(src))
+	copyHeaders(dst, src)
+	return dst
+}
+
+func copyHeaders(dst http.Header, src http.Header) {
+	for k, vv := range src {
 		vv2 := make([]string, len(vv))
 		copy(vv2, vv)
-		h2[k] = vv2
+		dst[k] = vv2
 	}
-	return h2
 }
 
 func headerHasValue(h http.Header, key, value string) bool {
 	for _, v := range h[key] {
 		if strings.EqualFold(value, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func strSliceContains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
 			return true
 		}
 	}

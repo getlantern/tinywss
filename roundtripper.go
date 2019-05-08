@@ -16,6 +16,9 @@ var defaultDial DialFN = TLSDialFN(nil)
 func TLSDialFN(tlsConf *tls.Config) DialFN {
 	return func(network, addr string) (net.Conn, error) {
 		conn, err := netx.Dial(network, addr)
+		if err != nil {
+			return nil, err
+		}
 		tlsConn := tls.Client(conn, tlsConf)
 		if err = tlsConn.Handshake(); err != nil {
 			return nil, err

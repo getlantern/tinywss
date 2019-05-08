@@ -90,10 +90,11 @@ func TestParallel(t *testing.T) {
 
 	for i := 0; i < 25; i++ {
 		for _, c := range clients {
+			cc := c
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if !_tryDialAndEcho(t, c) {
+				if !_tryDialAndEcho(t, cc) {
 					atomic.AddInt64(&fails, 1)
 				}
 			}()

@@ -16,11 +16,12 @@ import (
 var _ Client = &smuxClient{}
 
 type smuxClient struct {
-	wrapped *client
-	session *smux.Session
-	config  *smux.Config
-	mx      sync.Mutex
-	closed  bool
+	closed   uint64
+	session  atomic.Value
+	wrapped  *client
+	config   *smux.Config
+	mx       sync.Mutex
+	createMx sync.Mutex
 }
 
 func wrapClientSmux(c *client, opts *ClientOpts) Client {
@@ -50,42 +51,86 @@ func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
-	c.mx.Lock()
-	defer c.mx.Unlock()
-
-	if c.closed {
-		return nil, ErrClientClosed
-	}
 	var err error
+	var session *smux.Session
+	var conn net.Conn
+
 	for tries := 0; tries < 2; tries++ {
-		if c.session == nil {
-			if c.session, err = c.connect(ctx); err != nil {
-				return nil, err
-			}
+		session, err = c.getOrCreateSession(ctx)
+		if err != nil {
+			continue
 		}
 
-		conn, err := c.session.OpenStream()
-
+		conn, err = session.OpenStream()
 		if err == nil {
 			return conn, nil
 		} else {
-			c.session.Close()
-			c.session = nil
+			c.sessionError(session, err)
 		}
 	}
 	return nil, err
 }
 
+func (c *smuxClient) getOrCreateSession(ctx context.Context) (*smux.Session, error) {
+	c.createMx.Lock()
+	defer c.createMx.Unlock()
+
+	if c.isClosed() {
+		return nil, ErrClientClosed
+	}
+	session := c.curSession()
+	if session != nil {
+		return session, nil
+	}
+
+	session, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.storeSession(session)
+}
+
+func (c *smuxClient) sessionError(session *smux.Session, err error) {
+	c.mx.Lock()
+	if session == c.curSession() {
+		c.session.Store(nil)
+	}
+	c.mx.Unlock()
+	session.Close()
+}
+
+func (c *smuxClient) storeSession(session *smux.Session) (*smux.Session, error) {
+	c.mx.Lock()
+	defer c.mx.Unlock()
+	if c.isClosed() {
+		session.Close()
+		return nil, ErrClientClosed
+	}
+	c.session.Store(session)
+	return session, nil
+}
+
 // implements Client.Close
 func (c *smuxClient) Close() error {
 	c.mx.Lock()
-	c.closed = true
-	if c.session != nil {
-		c.session.Close()
-		c.session = nil
-	}
+	atomic.StoreUint64(&c.closed, 1)
 	c.mx.Unlock()
+
+	session := c.curSession()
+	if session != nil {
+		return session.Close()
+	}
 	return nil
+}
+
+func (c *smuxClient) curSession() *smux.Session {
+	s, _ := c.session.Load().(*smux.Session)
+	return s
+}
+
+func (c *smuxClient) isClosed() bool {
+	return atomic.LoadUint64(&c.closed) == 1
 }
 
 // implements Client.SetHeaders

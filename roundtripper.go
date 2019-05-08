@@ -1,11 +1,11 @@
 package tinywss
 
 import (
-	"bufio"
 	"crypto/tls"
 	"net"
 	"net/http"
 
+	"github.com/getlantern/bufconn"
 	"github.com/getlantern/netx"
 )
 
@@ -59,12 +59,12 @@ func (rt *roundTripHijacker) RoundTripHijack(req *http.Request) (*http.Response,
 		return nil, nil, err
 	}
 
-	buf := bufio.NewReaderSize(conn, 4096)
-	res, err := http.ReadResponse(buf, req)
+	bconn := bufconn.Wrap(conn)
+	res, err := http.ReadResponse(bconn.Head(), req)
 	if err != nil {
-		conn.Close()
+		bconn.Close()
 		return nil, nil, err
 	}
 
-	return res, conn, nil
+	return res, bconn, nil
 }

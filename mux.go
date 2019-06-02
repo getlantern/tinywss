@@ -15,6 +15,8 @@ import (
 
 var _ Client = &smuxClient{}
 
+var nullSession = &smux.Session{}
+
 type smuxClient struct {
 	closed   uint64
 	session  atomic.Value
@@ -94,7 +96,7 @@ func (c *smuxClient) getOrCreateSession(ctx context.Context) (*smux.Session, err
 func (c *smuxClient) sessionError(session *smux.Session, err error) {
 	c.mx.Lock()
 	if session == c.curSession() {
-		c.session.Store(nil)
+		c.session.Store(nullSession)
 	}
 	c.mx.Unlock()
 	session.Close()
@@ -126,6 +128,9 @@ func (c *smuxClient) Close() error {
 
 func (c *smuxClient) curSession() *smux.Session {
 	s, _ := c.session.Load().(*smux.Session)
+	if s == nullSession {
+		return nil
+	}
 	return s
 }
 

@@ -21,8 +21,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const (
+	authHeader = "X-Auth-Foo"
+	authValue  = "BarBarBar"
+)
+
 func TestEchoRaw(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolRaw})
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, true)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -38,7 +43,7 @@ func TestEchoRaw(t *testing.T) {
 }
 
 func TestEchoMux(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux})
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, true)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -54,7 +59,7 @@ func TestEchoMux(t *testing.T) {
 }
 
 func TestEchoRawAndMux(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux, ProtocolRaw})
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, true)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -74,7 +79,7 @@ func TestEchoRawAndMux(t *testing.T) {
 }
 
 func TestParallel(t *testing.T) {
-	l, err := startEchoServer([]string{ProtocolMux, ProtocolRaw})
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, true)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -106,6 +111,10 @@ func TestParallel(t *testing.T) {
 }
 
 func _tryDialAndEcho(t *testing.T, c Client) bool {
+	testHdr := make(http.Header, 1)
+	testHdr.Set(authHeader, authValue)
+	c.SetHeaders(testHdr)
+
 	ctx := context.Background()
 	ctx, _ = context.WithTimeout(ctx, 1*time.Second)
 	conn, err := c.DialContext(ctx)
@@ -501,6 +510,10 @@ func generateKeyPair() (tls.Certificate, error) {
 }
 
 func startEchoServer(protocols []string) (net.Listener, error) {
+	return startEchoServerOptions(protocols, false)
+}
+
+func startEchoServerOptions(protocols []string, requireHeader bool) (net.Listener, error) {
 	tlsConf, err := generateTLSConfig()
 	if err != nil {
 		return nil, err
@@ -522,6 +535,19 @@ func startEchoServer(protocols []string) (net.Listener, error) {
 			}
 			go func() {
 				defer c.Close()
+				if requireHeader {
+					wc, ok := c.(*WsConn)
+					if !ok {
+						log.Debugf("rejecting echo client (not WsConn?)")
+						return
+					}
+					hdr := wc.UpgradeHeaders()
+					if hdr.Get(authHeader) != authValue {
+						log.Debugf("rejecting echo client (bad auth header)")
+						return
+					}
+				}
+
 				io.Copy(c, c)
 			}()
 		}

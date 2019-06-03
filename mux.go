@@ -210,7 +210,7 @@ func (l *smuxListener) listen() {
 }
 
 func (l *smuxListener) handleConn(conn net.Conn) {
-	wconn, ok := conn.(*wsConn)
+	wconn, ok := conn.(*WsConn)
 	if !ok {
 		log.Errorf("not handling unexpected connection type")
 		conn.Close()
@@ -232,7 +232,7 @@ func (l *smuxListener) handleConn(conn net.Conn) {
 	}
 }
 
-func (l *smuxListener) handleSession(conn *wsConn) {
+func (l *smuxListener) handleSession(conn *WsConn) {
 	session, err := smux.Server(conn, l.config)
 	if err != nil {
 		log.Errorf("error handing mux connection: %s", err)
@@ -247,12 +247,13 @@ func (l *smuxListener) handleSession(conn *wsConn) {
 			return
 		}
 		atomic.AddInt64(&l.numVirtualConnections, 1)
-		l.connections <- &wsConn{
+		l.connections <- &WsConn{
 			Conn:     stream,
 			protocol: ProtocolMux,
 			onClose: func() {
 				atomic.AddInt64(&l.numVirtualConnections, -1)
 			},
+			headers: cloneHeaders(conn.UpgradeHeaders()),
 		}
 	}
 }

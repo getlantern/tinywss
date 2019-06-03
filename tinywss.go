@@ -51,23 +51,30 @@ func handshakeErr(message string) error {
 	}
 }
 
-type wsConn struct {
+type WsConn struct {
 	net.Conn
 	protocol string
 	onClose  func()
+	headers  http.Header
 }
 
 // Wrapped implements the interface netx.WrappedConn
-func (c *wsConn) Wrapped() net.Conn {
+func (c *WsConn) Wrapped() net.Conn {
 	return c.Conn
 }
 
 // implements net.Conn.Close()
-func (c *wsConn) Close() error {
+func (c *WsConn) Close() error {
 	if c.onClose != nil {
 		c.onClose()
 	}
 	return c.Conn.Close()
+}
+
+// returns the headers on the initial HTTP connection that was upgraded
+// to create this WsConn.
+func (c *WsConn) UpgradeHeaders() http.Header {
+	return c.headers
 }
 
 type Client interface {

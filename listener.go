@@ -227,7 +227,11 @@ func (l *listener) upgrade(w http.ResponseWriter, r *http.Request) (net.Conn, er
 		conn.SetWriteDeadline(time.Time{})
 	}
 
-	return &wsConn{conn, wsproto, nil}, nil
+	return &WsConn{
+		Conn:     conn,
+		protocol: wsproto,
+		headers:  cloneHeaders(r.Header),
+	}, nil
 }
 
 func (l *listener) supportsProtocol(p string) bool {

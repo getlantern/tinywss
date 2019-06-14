@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/getlantern/ops"
+	"github.com/pkg/errors"
 	"github.com/xtaci/smux"
 )
 
@@ -24,6 +25,36 @@ type smuxClient struct {
 	config   *smux.Config
 	mx       sync.Mutex
 	createMx sync.Mutex
+}
+
+type smuxConn struct {
+	net.Conn
+}
+
+func (c *smuxConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	return n, errors.Cause(err)
+}
+
+func (c *smuxConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	return n, errors.Cause(err)
+}
+
+func (c *smuxConn) Close() error {
+	return errors.Cause(c.Conn.Close())
+}
+
+func (c *smuxConn) SetDeadline(t time.Time) error {
+	return errors.Cause(c.Conn.SetDeadline(t))
+}
+
+func (c *smuxConn) SetReadDeadline(t time.Time) error {
+	return errors.Cause(c.Conn.SetReadDeadline(t))
+}
+
+func (c *smuxConn) SetWriteDeadline(t time.Time) error {
+	return errors.Cause(c.Conn.SetWriteDeadline(t))
 }
 
 func wrapClientSmux(c *client, opts *ClientOpts) Client {
@@ -64,8 +95,9 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 
 		conn, err = session.OpenStream()
+		err = errors.Cause(err)
 		if err == nil {
-			return conn, nil
+			return &smuxConn{conn}, nil
 		} else {
 			c.sessionError(session, err)
 		}
@@ -149,6 +181,7 @@ func (c *smuxClient) connect(ctx context.Context) (*smux.Session, error) {
 		return nil, err
 	}
 	session, err := smux.Client(conn, c.config)
+	err = errors.Cause(err)
 	if err != nil {
 		c.Close()
 		return nil, err
@@ -234,6 +267,7 @@ func (l *smuxListener) handleConn(conn net.Conn) {
 
 func (l *smuxListener) handleSession(conn *WsConn) {
 	session, err := smux.Server(conn, l.config)
+	err = errors.Cause(err)
 	if err != nil {
 		log.Errorf("error handing mux connection: %s", err)
 	}
@@ -242,13 +276,14 @@ func (l *smuxListener) handleSession(conn *WsConn) {
 
 	for {
 		stream, err := session.AcceptStream()
+		err = errors.Cause(err)
 		if err != nil {
 			log.Debugf("accepting stream: %v", err)
 			return
 		}
 		atomic.AddInt64(&l.numVirtualConnections, 1)
 		l.connections <- &WsConn{
-			Conn:     stream,
+			Conn:     &smuxConn{stream},
 			protocol: ProtocolMux,
 			onClose: func() {
 				atomic.AddInt64(&l.numVirtualConnections, -1)

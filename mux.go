@@ -16,7 +16,10 @@ import (
 
 var _ Client = &smuxClient{}
 
-var nullSession = &smux.Session{}
+var (
+	nullSession = &smux.Session{}
+	errTimeout  = &timeoutError{}
+)
 
 type smuxClient struct {
 	closed   uint64
@@ -33,28 +36,28 @@ type smuxConn struct {
 
 func (c *smuxConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
-	return n, errors.Cause(err)
+	return n, translateSmuxErr(err)
 }
 
 func (c *smuxConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
-	return n, errors.Cause(err)
+	return n, translateSmuxErr(err)
 }
 
 func (c *smuxConn) Close() error {
-	return errors.Cause(c.Conn.Close())
+	return translateSmuxErr(c.Conn.Close())
 }
 
 func (c *smuxConn) SetDeadline(t time.Time) error {
-	return errors.Cause(c.Conn.SetDeadline(t))
+	return translateSmuxErr(c.Conn.SetDeadline(t))
 }
 
 func (c *smuxConn) SetReadDeadline(t time.Time) error {
-	return errors.Cause(c.Conn.SetReadDeadline(t))
+	return translateSmuxErr(c.Conn.SetReadDeadline(t))
 }
 
 func (c *smuxConn) SetWriteDeadline(t time.Time) error {
-	return errors.Cause(c.Conn.SetWriteDeadline(t))
+	return translateSmuxErr(c.Conn.SetWriteDeadline(t))
 }
 
 func wrapClientSmux(c *client, opts *ClientOpts) Client {
@@ -95,7 +98,7 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 
 		conn, err = session.OpenStream()
-		err = errors.Cause(err)
+		err = translateSmuxErr(err)
 		if err == nil {
 			return &smuxConn{conn}, nil
 		} else {
@@ -181,13 +184,34 @@ func (c *smuxClient) connect(ctx context.Context) (*smux.Session, error) {
 		return nil, err
 	}
 	session, err := smux.Client(conn, c.config)
-	err = errors.Cause(err)
+	err = translateSmuxErr(err)
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
 	return session, nil
 }
+
+func translateSmuxErr(err error) error {
+	err = errors.Cause(err)
+	if err == nil {
+		return err
+	} else if _, ok := err.(net.Error); ok {
+		return err
+	} else if strings.Contains(err.Error(), "timeout") { // certain newer versions
+		return errTimeout
+	} else {
+		return err
+	}
+}
+
+var _ net.Error = &timeoutError{}
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
 
 var _ net.Listener = &smuxListener{}
 
@@ -267,7 +291,7 @@ func (l *smuxListener) handleConn(conn net.Conn) {
 
 func (l *smuxListener) handleSession(conn *WsConn) {
 	session, err := smux.Server(conn, l.config)
-	err = errors.Cause(err)
+	err = translateSmuxErr(err)
 	if err != nil {
 		log.Errorf("error handing mux connection: %s", err)
 	}
@@ -276,7 +300,7 @@ func (l *smuxListener) handleSession(conn *WsConn) {
 
 	for {
 		stream, err := session.AcceptStream()
-		err = errors.Cause(err)
+		err = translateSmuxErr(err)
 		if err != nil {
 			log.Debugf("accepting stream: %v", err)
 			return

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +30,7 @@ type client struct {
 	rt        RoundTripHijacker
 	headers   http.Header // Sent with each https connection
 	dialOrDie *dialHelper
+	mx        sync.Mutex
 }
 
 // NewClient constructs a new tinywss.Client with
@@ -76,6 +78,7 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.SetDeadline(time.Time{})
 	closeOnExit := true
 	defer func() {
 		if closeOnExit {
@@ -89,7 +92,7 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 	default:
 	}
 
-	err = c.validateResponse(res, wskey)
+	err = c.validateResponse(res, wskey, req.Header.Get("Sec-Websocket-Protocol"))
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +111,10 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 		return nil, err
 	}
 
+	c.mx.Lock()
 	hdr := cloneHeaders(c.headers)
+	c.mx.Unlock()
+
 	hdr.Set("Upgrade", "websocket")
 	hdr.Set("Connection", "Upgrade")
 	hdr.Set("Sec-WebSocket-Key", wskey)
@@ -124,7 +130,7 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 	}, nil
 }
 
-func (c *client) validateResponse(res *http.Response, wskey string) error {
+func (c *client) validateResponse(res *http.Response, wskey, protocol string) error {
 	if res.StatusCode != 101 {
 		return handshakeErr(fmt.Sprintf("unexpected status %d", res.StatusCode))
 	}
@@ -138,9 +144,9 @@ func (c *client) validateResponse(res *http.Response, wskey string) error {
 		return handshakeErr("`Sec-Websocket-Accept` header is missing or invalid")
 	}
 
-	proto := res.Header.Get("Sec-Websocket-Protocol")
-	if !strings.EqualFold(proto, c.headers.Get("Sec-Websocket-Protocol")) {
-		return handshakeErr(fmt.Sprintf("`Sec-Websocket-Protocol` header is missing or invalid (%s)", proto))
+	rproto := res.Header.Get("Sec-Websocket-Protocol")
+	if !strings.EqualFold(rproto, protocol) {
+		return handshakeErr(fmt.Sprintf("`Sec-Websocket-Protocol` header is missing or invalid (%s)", rproto))
 	}
 
 	return nil
@@ -148,7 +154,9 @@ func (c *client) validateResponse(res *http.Response, wskey string) error {
 
 // implements Client.SetHeaders
 func (c *client) SetHeaders(h http.Header) {
+	c.mx.Lock()
 	copyHeaders(c.headers, h)
+	c.mx.Unlock()
 }
 
 // implements Client.Close

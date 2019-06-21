@@ -17,13 +17,18 @@ import (
 var _ Client = &smuxClient{}
 
 var (
-	nullSession = &smux.Session{}
-	errTimeout  = &timeoutError{}
+	nullCtx    = &smuxContext{}
+	errTimeout = &timeoutError{}
 )
+
+type smuxContext struct {
+	session *smux.Session
+	conn    net.Conn // the underlying Conn
+}
 
 type smuxClient struct {
 	closed   uint64
-	session  atomic.Value
+	ctx      atomic.Value
 	wrapped  *client
 	config   *smux.Config
 	mx       sync.Mutex
@@ -32,6 +37,7 @@ type smuxClient struct {
 
 type smuxConn struct {
 	net.Conn
+	next net.Conn // next Wrapped (underlying Conn)
 }
 
 func (c *smuxConn) Read(b []byte) (int, error) {
@@ -58,6 +64,10 @@ func (c *smuxConn) SetReadDeadline(t time.Time) error {
 
 func (c *smuxConn) SetWriteDeadline(t time.Time) error {
 	return translateSmuxErr(c.Conn.SetWriteDeadline(t))
+}
+
+func (c *smuxConn) Wrapped() net.Conn {
+	return c.next
 }
 
 func wrapClientSmux(c *client, opts *ClientOpts) Client {
@@ -89,10 +99,10 @@ func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
 func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 	var err error
 	var session *smux.Session
-	var conn net.Conn
+	var conn, sconn net.Conn
 
 	for tries := 0; tries < 2; tries++ {
-		session, err = c.getOrCreateSession(ctx)
+		session, sconn, err = c.getOrCreateSession(ctx)
 		if err != nil {
 			continue
 		}
@@ -100,7 +110,7 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 		conn, err = session.OpenStream()
 		err = translateSmuxErr(err)
 		if err == nil {
-			return &smuxConn{conn}, nil
+			return &smuxConn{conn, sconn}, nil
 		} else {
 			c.sessionError(session, err)
 		}
@@ -108,44 +118,45 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 	return nil, err
 }
 
-func (c *smuxClient) getOrCreateSession(ctx context.Context) (*smux.Session, error) {
+func (c *smuxClient) getOrCreateSession(ctx context.Context) (*smux.Session, net.Conn, error) {
 	c.createMx.Lock()
 	defer c.createMx.Unlock()
 
 	if c.isClosed() {
-		return nil, ErrClientClosed
+		return nil, nil, ErrClientClosed
 	}
-	session := c.curSession()
+	session, conn := c.curSession()
 	if session != nil {
-		return session, nil
+		return session, conn, nil
 	}
 
-	session, err := c.connect(ctx)
+	session, conn, err := c.connect(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return c.storeSession(session)
+	return c.storeSession(session, conn)
 }
 
 func (c *smuxClient) sessionError(session *smux.Session, err error) {
 	c.mx.Lock()
-	if session == c.curSession() {
-		c.session.Store(nullSession)
+	cur, _ := c.curSession()
+	if session == cur {
+		c.ctx.Store(nullCtx)
 	}
 	c.mx.Unlock()
 	session.Close()
 }
 
-func (c *smuxClient) storeSession(session *smux.Session) (*smux.Session, error) {
+func (c *smuxClient) storeSession(session *smux.Session, conn net.Conn) (*smux.Session, net.Conn, error) {
 	c.mx.Lock()
 	defer c.mx.Unlock()
 	if c.isClosed() {
 		session.Close()
-		return nil, ErrClientClosed
+		return nil, nil, ErrClientClosed
 	}
-	c.session.Store(session)
-	return session, nil
+	c.ctx.Store(&smuxContext{session, conn})
+	return session, conn, nil
 }
 
 // implements Client.Close
@@ -154,19 +165,19 @@ func (c *smuxClient) Close() error {
 	atomic.StoreUint64(&c.closed, 1)
 	c.mx.Unlock()
 
-	session := c.curSession()
+	session, _ := c.curSession()
 	if session != nil {
 		return session.Close()
 	}
 	return nil
 }
 
-func (c *smuxClient) curSession() *smux.Session {
-	s, _ := c.session.Load().(*smux.Session)
-	if s == nullSession {
-		return nil
+func (c *smuxClient) curSession() (*smux.Session, net.Conn) {
+	s, _ := c.ctx.Load().(*smuxContext)
+	if s == nullCtx || s == nil {
+		return nil, nil
 	}
-	return s
+	return s.session, s.conn
 }
 
 func (c *smuxClient) isClosed() bool {
@@ -178,18 +189,18 @@ func (c *smuxClient) SetHeaders(h http.Header) {
 	c.wrapped.SetHeaders(h)
 }
 
-func (c *smuxClient) connect(ctx context.Context) (*smux.Session, error) {
+func (c *smuxClient) connect(ctx context.Context) (*smux.Session, net.Conn, error) {
 	conn, err := c.wrapped.dialContext(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	session, err := smux.Client(conn, c.config)
 	err = translateSmuxErr(err)
 	if err != nil {
 		c.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return session, nil
+	return session, conn, nil
 }
 
 func translateSmuxErr(err error) error {
@@ -307,7 +318,7 @@ func (l *smuxListener) handleSession(conn *WsConn) {
 		}
 		atomic.AddInt64(&l.numVirtualConnections, 1)
 		l.connections <- &WsConn{
-			Conn:     &smuxConn{stream},
+			Conn:     &smuxConn{stream, conn},
 			protocol: ProtocolMux,
 			onClose: func() {
 				atomic.AddInt64(&l.numVirtualConnections, -1)

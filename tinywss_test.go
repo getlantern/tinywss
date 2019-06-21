@@ -555,6 +555,92 @@ func TestDeadlineErrorShapes(t *testing.T) {
 	}
 }
 
+func TestWrappedConnClient(t *testing.T) {
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, false)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer l.Close()
+
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
+	for i, c := range clients {
+		ctx := context.Background()
+		ctx, _ = context.WithTimeout(ctx, 1*time.Second)
+		conn, err := c.DialContext(ctx)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		foundTLS := false
+		findTLS := func(c net.Conn) bool {
+			if _, ok := c.(*tls.Conn); ok {
+				foundTLS = true
+				return false
+			}
+			return true
+		}
+
+		netx.WalkWrapped(conn, findTLS)
+		if !assert.True(t, foundTLS, "could not find underlying tls.Conn (client %d)", i) {
+			return
+		}
+	}
+}
+
+func TestWrappedConnServer(t *testing.T) {
+	tlsConf, err := generateTLSConfig()
+	if !assert.NoError(t, err) {
+		return
+	}
+	l, err := ListenAddr(&ListenOpts{
+		Addr:      ":0",
+		TLSConf:   tlsConf,
+		Protocols: []string{ProtocolMux, ProtocolRaw},
+	})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				foundTLS := false
+				findTLS := func(c net.Conn) bool {
+					if _, ok := c.(*tls.Conn); ok {
+						foundTLS = true
+						return false
+					}
+					return true
+				}
+				netx.WalkWrapped(c, findTLS)
+				if !foundTLS {
+					return // fail: don't echo
+				}
+
+				io.Copy(c, c)
+			}()
+		}
+	}()
+
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
+	for _, c := range clients {
+		if !_tryDialAndEcho(t, c) {
+			return
+		}
+	}
+}
+
 func generateTLSConfig() (*tls.Config, error) {
 	tlsCert, err := generateKeyPair()
 	if err != nil {

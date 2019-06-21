@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/getlantern/netx"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -482,6 +483,76 @@ func TestDialHelperLimit(t *testing.T) {
 	ctx, _ = context.WithTimeout(ctx, 1*time.Millisecond)
 	_, err = dh.Do(ctx, stall)
 	assert.Equal(t, "context deadline exceeded", err.Error())
+}
+
+func TestDeadlineErrorShapes(t *testing.T) {
+	l, err := startEchoServerOptions([]string{ProtocolMux}, false)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer l.Close()
+
+	c := testClientFor(l, true)
+
+	ctx := context.Background()
+	ctx, _ = context.WithTimeout(ctx, 1*time.Second)
+	conn, err := c.DialContext(ctx)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 512)
+	buf2 := make([]byte, 512)
+
+	// read that will time out
+	err = conn.SetReadDeadline(time.Now().Add(-1 * time.Second))
+	if !assert.NoError(t, err) {
+		return
+	}
+	_, err = conn.Read(buf2)
+	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
+		return
+	}
+	err = conn.SetReadDeadline(time.Time{})
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	_, err = rand.Read(buf)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	// write that should time out
+	err = conn.SetWriteDeadline(time.Now().Add(-1 * time.Second))
+	if !assert.NoError(t, err) {
+		return
+	}
+	_, err = conn.Write(buf)
+	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
+		return
+	}
+	err = conn.SetWriteDeadline(time.Time{})
+	if !assert.NoError(t, err) {
+		return
+	}
+	// Note: this only works in the mux case, a tls.Conn can only
+	// have one write timeout fire, then it becomes corrupt forever:
+	// https://golang.org/pkg/crypto/tls/#Conn.SetWriteDeadline
+	_, err = conn.Write(buf)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	_, err = io.ReadFull(conn, buf2)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	if !assert.Equal(t, buf, buf2) {
+		return
+	}
 }
 
 func generateTLSConfig() (*tls.Config, error) {

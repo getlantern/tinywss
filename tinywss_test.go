@@ -20,6 +20,7 @@ import (
 
 	"github.com/getlantern/netx"
 	"github.com/stretchr/testify/assert"
+	"github.com/xtaci/smux"
 )
 
 const (
@@ -502,24 +503,19 @@ func TestDeadlineErrorShapes(t *testing.T) {
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 512)
-	buf2 := make([]byte, 512)
+	sz := 2 * smux.DefaultConfig().MaxFrameSize
+	buf := make([]byte, sz)
 
-	// read that will time out
+	// read that should time out
 	err = conn.SetReadDeadline(time.Now().Add(-1 * time.Second))
 	if !assert.NoError(t, err) {
 		return
 	}
-	_, err = conn.Read(buf2)
+	_, err = conn.Read(buf)
 	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
 		return
 	}
 	err = conn.SetReadDeadline(time.Time{})
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	_, err = rand.Read(buf)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -531,26 +527,6 @@ func TestDeadlineErrorShapes(t *testing.T) {
 	}
 	_, err = conn.Write(buf)
 	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
-		return
-	}
-	err = conn.SetWriteDeadline(time.Time{})
-	if !assert.NoError(t, err) {
-		return
-	}
-	// Note: this only works in the mux case, a tls.Conn can only
-	// have one write timeout fire, then it becomes corrupt forever:
-	// https://golang.org/pkg/crypto/tls/#Conn.SetWriteDeadline
-	_, err = conn.Write(buf)
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	_, err = io.ReadFull(conn, buf2)
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	if !assert.Equal(t, buf, buf2) {
 		return
 	}
 }

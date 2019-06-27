@@ -20,6 +20,7 @@ import (
 
 	"github.com/getlantern/netx"
 	"github.com/stretchr/testify/assert"
+	"github.com/xtaci/smux"
 )
 
 const (
@@ -502,24 +503,19 @@ func TestDeadlineErrorShapes(t *testing.T) {
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 512)
-	buf2 := make([]byte, 512)
+	sz := 2 * smux.DefaultConfig().MaxFrameSize
+	buf := make([]byte, sz)
 
-	// read that will time out
+	// read that should time out
 	err = conn.SetReadDeadline(time.Now().Add(-1 * time.Second))
 	if !assert.NoError(t, err) {
 		return
 	}
-	_, err = conn.Read(buf2)
+	_, err = conn.Read(buf)
 	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
 		return
 	}
 	err = conn.SetReadDeadline(time.Time{})
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	_, err = rand.Read(buf)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -533,25 +529,91 @@ func TestDeadlineErrorShapes(t *testing.T) {
 	if !assert.True(t, netx.IsTimeout(err), "error was not a timeout: %v", err) {
 		return
 	}
-	err = conn.SetWriteDeadline(time.Time{})
+}
+
+func TestWrappedConnClient(t *testing.T) {
+	l, err := startEchoServerOptions([]string{ProtocolMux, ProtocolRaw}, false)
 	if !assert.NoError(t, err) {
 		return
 	}
-	// Note: this only works in the mux case, a tls.Conn can only
-	// have one write timeout fire, then it becomes corrupt forever:
-	// https://golang.org/pkg/crypto/tls/#Conn.SetWriteDeadline
-	_, err = conn.Write(buf)
+	defer l.Close()
+
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
+	for i, c := range clients {
+		ctx := context.Background()
+		ctx, _ = context.WithTimeout(ctx, 1*time.Second)
+		conn, err := c.DialContext(ctx)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		foundTLS := false
+		findTLS := func(c net.Conn) bool {
+			if _, ok := c.(*tls.Conn); ok {
+				foundTLS = true
+				return false
+			}
+			return true
+		}
+
+		netx.WalkWrapped(conn, findTLS)
+		if !assert.True(t, foundTLS, "could not find underlying tls.Conn (client %d)", i) {
+			return
+		}
+	}
+}
+
+func TestWrappedConnServer(t *testing.T) {
+	tlsConf, err := generateTLSConfig()
+	if !assert.NoError(t, err) {
+		return
+	}
+	l, err := ListenAddr(&ListenOpts{
+		Addr:      ":0",
+		TLSConf:   tlsConf,
+		Protocols: []string{ProtocolMux, ProtocolRaw},
+	})
 	if !assert.NoError(t, err) {
 		return
 	}
 
-	_, err = io.ReadFull(conn, buf2)
-	if !assert.NoError(t, err) {
-		return
-	}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				foundTLS := false
+				findTLS := func(c net.Conn) bool {
+					if _, ok := c.(*tls.Conn); ok {
+						foundTLS = true
+						return false
+					}
+					return true
+				}
+				netx.WalkWrapped(c, findTLS)
+				if !foundTLS {
+					return // fail: don't echo
+				}
 
-	if !assert.Equal(t, buf, buf2) {
-		return
+				io.Copy(c, c)
+			}()
+		}
+	}()
+
+	clients := []Client{
+		testClientFor(l, true),
+		testClientFor(l, false),
+	}
+	for _, c := range clients {
+		if !_tryDialAndEcho(t, c) {
+			return
+		}
 	}
 }
 

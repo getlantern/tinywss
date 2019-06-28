@@ -19,6 +19,6 @@ require (
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pkg/errors v0.8.1
 	github.com/stretchr/testify v1.3.0
-	github.com/xtaci/smux v1.0.7
+	github.com/xtaci/smux v1.3.3
 	golang.org/x/sync v0.0.0-20190423024810-112230192c58
 )

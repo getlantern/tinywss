@@ -86,12 +86,6 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
 	err = c.validateResponse(res, wskey, req.Header.Get("Sec-Websocket-Protocol"))
 	if err != nil {
 		return nil, err

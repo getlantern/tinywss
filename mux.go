@@ -85,10 +85,13 @@ func wrapClientSmux(c *client, opts *ClientOpts) Client {
 		cfg.MaxReceiveBuffer = opts.MaxReceiveBuffer
 	}
 
-	return &smuxClient{
+	sc := &smuxClient{
 		wrapped: c,
 		config:  cfg,
 	}
+	sc.ctx.Store(nullCtx)
+
+	return sc
 }
 
 // implements Client.DialContext
@@ -174,7 +177,7 @@ func (c *smuxClient) Close() error {
 
 func (c *smuxClient) curSession() (*smux.Session, net.Conn) {
 	s, _ := c.ctx.Load().(*smuxContext)
-	if s == nullCtx || s == nil {
+	if s == nullCtx {
 		return nil, nil
 	}
 	return s.session, s.conn

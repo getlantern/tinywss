@@ -6,9 +6,11 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/getlantern/ops"
 	"golang.org/x/sync/semaphore"
@@ -65,6 +67,10 @@ func strSliceContains(ss []string, s string) bool {
 
 func sendError(w http.ResponseWriter, code int) {
 	http.Error(w, http.StatusText(code), code)
+}
+
+func randomize(d time.Duration) time.Duration {
+	return d/2 + time.Duration(mrand.Int63n(int64(d)))
 }
 
 // helps wrap a dial function that may-or-may-not respect the given

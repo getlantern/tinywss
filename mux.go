@@ -142,25 +142,31 @@ func (c *smuxClient) tryCreateSession() chan *_sce {
 			ch <- &_sce{session, conn, nil}
 			return
 		}
+		trySend := func(v *_sce) {
+			select {
+			case ch <- v:
+			default:
+			}
+		}
 		// Note that the time to create a new session should not be regulated
 		// by the context of opening a stream. Instead, it depends on the
 		// RoundTripHijacker which for now has seperate timeouts to dial
 		// server, perform TLS and WebSocket handshake.
 		conn, err := c.wrapped.dialContext(context.Background())
 		if err != nil {
-			ch <- &_sce{nil, nil, err}
+			trySend(&_sce{nil, nil, err})
 			return
 		}
 		session, err := smux.Client(conn, c.config)
 		err = translateSmuxErr(err)
 		if err != nil {
-			c.Close()
-			ch <- &_sce{nil, nil, err}
+			conn.Close()
+			trySend(&_sce{nil, nil, err})
 			return
 		}
 		sc := &smuxContext{session, conn}
 		c.ctx.Store(sc)
-		ch <- &_sce{sc.session, sc.conn, nil}
+		trySend(&_sce{sc.session, sc.conn, nil})
 	}()
 	return ch
 }

@@ -3,7 +3,6 @@ package tinywss
 import (
 	"context"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,11 +198,6 @@ func (c *smuxClient) curSession(ctx context.Context) (*smux.Session, net.Conn, e
 
 func (c *smuxClient) isClosed() bool {
 	return atomic.LoadUint64(&c.closed) == 1
-}
-
-// implements Client.SetHeaders
-func (c *smuxClient) SetHeaders(h http.Header) {
-	c.wrapped.SetHeaders(h)
 }
 
 func translateSmuxErr(err error) error {

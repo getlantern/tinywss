@@ -83,9 +83,6 @@ type Client interface {
 	// the context given expires before the server can be contacted.
 	DialContext(ctx context.Context) (net.Conn, error)
 
-	// SetHeaders sets additional custom headers sent on each HTTP connection
-	SetHeaders(header http.Header)
-
 	// Close shuts down any resources associated with the client
 	Close() error
 }

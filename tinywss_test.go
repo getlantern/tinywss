@@ -670,11 +670,11 @@ func startEchoServerOptions(protocols []string, requireHeader bool) (net.Listene
 						return
 					}
 					_ = wc
-					// hdr := wc.UpgradeHeaders()
-					// if hdr.Get(authHeader) != authValue {
-					// 	log.Debugf("rejecting echo client (bad auth header)")
-					// 	return
-					// }
+					hdr := wc.UpgradeHeaders()
+					if hdr.Get(authHeader) != authValue {
+						log.Debugf("rejecting echo client (bad auth header)")
+						return
+					}
 				}
 
 				io.Copy(c, c)
@@ -689,13 +689,13 @@ func testClientFor(l net.Listener, multiplexed bool) Client {
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 	}
+	testHdr := make(http.Header, 1)
+	testHdr.Set(authHeader, authValue)
 	c := NewClient(&ClientOpts{
 		URL:         fmt.Sprintf("wss://%s", l.Addr().String()),
 		RoundTrip:   NewRoundTripper(TLSDialFN(tlsConf)),
 		Multiplexed: multiplexed,
+		Headers:     testHdr,
 	})
-	testHdr := make(http.Header, 1)
-	testHdr.Set(authHeader, authValue)
-	c.SetHeaders(testHdr)
 	return c
 }

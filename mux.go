@@ -102,20 +102,10 @@ func (c *smuxClient) sessionLoop() {
 	for range c.chSessionReq {
 		for {
 			minRetryInterval.Reset(randomize(10 * time.Second))
-			var session *smux.Session
-			// Note that the time to create a new session should not be regulated
-			// by the context of opening a stream. Instead, it depends on the
-			// RoundTripHijacker which for now has seperate timeouts to dial
-			// server, perform TLS and WebSocket handshake.
-			conn, err := c.wrapped.dialContext(context.Background())
+			session, conn, err := c.newSession()
 			if err != nil {
-				goto retry
-			}
-			session, err = smux.Client(conn, c.config)
-			err = translateSmuxErr(err)
-			if err != nil {
-				conn.Close()
-				goto retry
+				<-minRetryInterval.C
+				continue
 			}
 			if c.isClosed() {
 				conn.Close()
@@ -123,10 +113,24 @@ func (c *smuxClient) sessionLoop() {
 			}
 			c.chCurSession <- &smuxContext{session, conn}
 			break
-		retry:
-			<-minRetryInterval.C
 		}
 	}
+}
+
+func (c *smuxClient) newSession() (*smux.Session, net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dialSessionTimeout)
+	defer cancel()
+	conn, err := c.wrapped.dialContext(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	session, err := smux.Client(conn, c.config)
+	err = translateSmuxErr(err)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return session, conn, nil
 }
 
 // implements Client.DialContext

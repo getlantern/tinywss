@@ -26,6 +26,7 @@ var (
 	// ErrDialerClosed is the error returned if client is used after closed
 	ErrClientClosed         = errors.New("client closed")
 	log                     = golog.LoggerFor("tinywss")
+	dialSessionTimeout      = 1 * time.Minute
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultProtocols        = []string{ProtocolMux, ProtocolRaw}
 )

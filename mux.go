@@ -85,14 +85,14 @@ func wrapClientSmux(c *client, opts *ClientOpts) Client {
 	sc := &smuxClient{
 		wrapped:      c,
 		config:       cfg,
-		chSessionReq: make(chan struct{}, 1),
+		chSessionReq: make(chan struct{}),
 		// there's at most one live session any time, but have to use buffered
 		// channel as otherwise the goroutine putting session back would block
 		// if there's no one else receiving from the channel.
 		chCurSession: make(chan *smuxContext, 1),
 	}
 	go sc.sessionLoop()
-	sc.requestNewSession()
+	sc.chSessionReq <- struct{}{}
 	return sc
 }
 

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ type smuxContext struct {
 
 type smuxClient struct {
 	closed       uint64
+	muClose      sync.RWMutex
 	wrapped      *client
 	config       *smux.Config
 	chCurSession chan *smuxContext
@@ -151,17 +153,23 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *smuxClient) requestNewSession() {
+	// prevent writing to c.chSessionReq after channel closed
+	c.muClose.RLock()
 	if !c.isClosed() {
 		select {
 		case c.chSessionReq <- struct{}{}:
 		default:
 		}
 	}
+	c.muClose.RUnlock()
 }
 
 // implements Client.Close
 func (c *smuxClient) Close() error {
+	c.muClose.Lock()
 	atomic.StoreUint64(&c.closed, 1)
+	close(c.chSessionReq)
+	c.muClose.Unlock()
 
 	// when dialing is in progress, the session may not be in the channel,
 	// hence unable to be closed, but the chance is low.
@@ -170,7 +178,6 @@ func (c *smuxClient) Close() error {
 		ses.session.Close()
 	default:
 	}
-	close(c.chSessionReq)
 	return nil
 }
 

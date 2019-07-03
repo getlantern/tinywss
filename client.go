@@ -30,7 +30,7 @@ type client struct {
 	rt        RoundTripHijacker
 	headers   http.Header // Sent with each https connection
 	dialOrDie *dialHelper
-	mx        sync.Mutex
+	mx        sync.RWMutex
 }
 
 // NewClient constructs a new tinywss.Client with
@@ -105,9 +105,9 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 		return nil, err
 	}
 
-	c.mx.Lock()
+	c.mx.RLock()
 	hdr := cloneHeaders(c.headers)
-	c.mx.Unlock()
+	c.mx.RUnlock()
 
 	hdr.Set("Upgrade", "websocket")
 	hdr.Set("Connection", "Upgrade")

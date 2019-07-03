@@ -113,12 +113,7 @@ func TestParallel(t *testing.T) {
 }
 
 func _tryDialAndEcho(t *testing.T, c Client) bool {
-	testHdr := make(http.Header, 1)
-	testHdr.Set(authHeader, authValue)
-	c.SetHeaders(testHdr)
-
-	ctx := context.Background()
-	ctx, _ = context.WithTimeout(ctx, 1*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 	conn, err := c.DialContext(ctx)
 	if !assert.NoError(t, err) {
 		return false
@@ -693,9 +688,13 @@ func testClientFor(l net.Listener, multiplexed bool) Client {
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	return NewClient(&ClientOpts{
+	c := NewClient(&ClientOpts{
 		URL:         fmt.Sprintf("wss://%s", l.Addr().String()),
 		RoundTrip:   NewRoundTripper(TLSDialFN(tlsConf)),
 		Multiplexed: multiplexed,
 	})
+	testHdr := make(http.Header, 1)
+	testHdr.Set(authHeader, authValue)
+	c.SetHeaders(testHdr)
+	return c
 }

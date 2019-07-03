@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,7 +16,6 @@ import (
 var _ Client = &smuxClient{}
 
 var (
-	nullCtx    = &smuxContext{}
 	errTimeout = &timeoutError{}
 )
 
@@ -27,12 +25,11 @@ type smuxContext struct {
 }
 
 type smuxClient struct {
-	closed   uint64
-	ctx      atomic.Value
-	wrapped  *client
-	config   *smux.Config
-	mx       sync.Mutex
-	createMx sync.Mutex
+	closed       uint64
+	wrapped      *client
+	config       *smux.Config
+	chCurSession chan *smuxContext
+	chSessionReq chan struct{}
 }
 
 type smuxConn struct {
@@ -86,12 +83,44 @@ func wrapClientSmux(c *client, opts *ClientOpts) Client {
 	}
 
 	sc := &smuxClient{
-		wrapped: c,
-		config:  cfg,
+		wrapped:      c,
+		config:       cfg,
+		chSessionReq: make(chan struct{}, 1),
+		// there's at most one live session any time, but have to use buffered
+		// channel as otherwise the goroutine putting session back would block
+		// if there's no one else receiving from the channel.
+		chCurSession: make(chan *smuxContext, 1),
 	}
-	sc.ctx.Store(nullCtx)
-
+	go sc.sessionLoop()
+	sc.requestNewSession()
 	return sc
+}
+
+func (c *smuxClient) sessionLoop() {
+	for range c.chSessionReq {
+		for {
+			// Note that the time to create a new session should not be regulated
+			// by the context of opening a stream. Instead, it depends on the
+			// RoundTripHijacker which for now has seperate timeouts to dial
+			// server, perform TLS and WebSocket handshake.
+			conn, err := c.wrapped.dialContext(context.Background())
+			if err != nil {
+				continue
+			}
+			session, err := smux.Client(conn, c.config)
+			err = translateSmuxErr(err)
+			if err != nil {
+				conn.Close()
+				continue
+			}
+			if c.isClosed() {
+				conn.Close()
+				return
+			}
+			c.chCurSession <- &smuxContext{session, conn}
+			break
+		}
+	}
 }
 
 // implements Client.DialContext
@@ -103,103 +132,57 @@ func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
 	if c.isClosed() {
 		return nil, ErrClientClosed
 	}
-	session, sconn := c.curSession()
-	if session == nil {
-		ch := c.tryCreateSession()
-		select {
-		case sce := <-ch:
-			if sce.err != nil {
-				return nil, sce.err
-			}
-			session, sconn = sce.session, sce.conn
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	session, sconn, err := c.curSession(ctx)
+	if err != nil {
+		return nil, err
 	}
 	conn, err := session.OpenStream()
-	err = translateSmuxErr(err)
-	if err == nil {
-		return &smuxConn{conn, sconn}, nil
-	} else {
-		c.sessionError(session, err)
+	if err != nil {
+		session.Close()
+		c.requestNewSession()
+		return nil, translateSmuxErr(err)
 	}
-	return nil, err
+	return &smuxConn{conn, sconn}, nil
 }
 
-type _sce struct {
-	session *smux.Session
-	conn    net.Conn
-	err     error
-}
-
-func (c *smuxClient) tryCreateSession() chan *_sce {
-	ch := make(chan *_sce)
-	go func() {
-		c.createMx.Lock()
-		defer c.createMx.Unlock()
-		// check again in case if the session becomes valid after grabing the lock.
-		if session, conn := c.curSession(); session != nil {
-			ch <- &_sce{session, conn, nil}
-			return
+func (c *smuxClient) requestNewSession() {
+	if !c.isClosed() {
+		select {
+		case c.chSessionReq <- struct{}{}:
+		default:
 		}
-		trySend := func(v *_sce) {
-			select {
-			case ch <- v:
-			default:
-			}
-		}
-		// Note that the time to create a new session should not be regulated
-		// by the context of opening a stream. Instead, it depends on the
-		// RoundTripHijacker which for now has seperate timeouts to dial
-		// server, perform TLS and WebSocket handshake.
-		conn, err := c.wrapped.dialContext(context.Background())
-		if err != nil {
-			trySend(&_sce{nil, nil, err})
-			return
-		}
-		session, err := smux.Client(conn, c.config)
-		err = translateSmuxErr(err)
-		if err != nil {
-			conn.Close()
-			trySend(&_sce{nil, nil, err})
-			return
-		}
-		sc := &smuxContext{session, conn}
-		c.ctx.Store(sc)
-		trySend(&_sce{sc.session, sc.conn, nil})
-	}()
-	return ch
-}
-
-func (c *smuxClient) sessionError(session *smux.Session, err error) {
-	c.mx.Lock()
-	cur, _ := c.curSession()
-	if session == cur {
-		c.ctx.Store(nullCtx)
 	}
-	c.mx.Unlock()
-	session.Close()
 }
 
 // implements Client.Close
 func (c *smuxClient) Close() error {
-	c.mx.Lock()
 	atomic.StoreUint64(&c.closed, 1)
-	c.mx.Unlock()
 
-	session, _ := c.curSession()
-	if session != nil {
-		return session.Close()
+	// when dialing is in progress, the session may not be in the channel,
+	// hence unable to be closed, but the chance is low.
+	select {
+	case ses := <-c.chCurSession:
+		ses.session.Close()
+	default:
 	}
+	close(c.chSessionReq)
 	return nil
 }
 
-func (c *smuxClient) curSession() (*smux.Session, net.Conn) {
-	s, _ := c.ctx.Load().(*smuxContext)
-	if s == nullCtx {
-		return nil, nil
+func (c *smuxClient) curSession(ctx context.Context) (*smux.Session, net.Conn, error) {
+	for {
+		select {
+		case ses := <-c.chCurSession:
+			if ses.session.IsClosed() {
+				// drop the current session and wait for the next available
+				continue
+			}
+			c.chCurSession <- ses
+			return ses.session, ses.conn, nil
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
 	}
-	return s.session, s.conn
 }
 
 func (c *smuxClient) isClosed() bool {
@@ -241,7 +224,6 @@ type smuxListener struct {
 	config                *smux.Config
 	numConnections        int64
 	numVirtualConnections int64
-	mx                    sync.Mutex
 }
 
 func wrapListenerSmux(l *listener, opts *ListenOpts) (net.Listener, error) {
@@ -351,8 +333,6 @@ func (l *smuxListener) Accept() (net.Conn, error) {
 
 // implements net.Listener.Close
 func (l *smuxListener) Close() error {
-	l.mx.Lock()
-	defer l.mx.Unlock()
 	select {
 	case <-l.closed:
 		return nil

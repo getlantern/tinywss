@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -445,40 +444,6 @@ func TestBadRequest(t *testing.T) {
 			continue
 		}
 	}
-}
-
-func TestDialHelperLimit(t *testing.T) {
-	dh := newDialHelper(2)
-
-	stall := func(ctx context.Context) (net.Conn, error) {
-		time.Sleep(1 * time.Second)
-		return nil, errors.New("unexpected case")
-	}
-
-	ctx := context.Background()
-	ctx, _ = context.WithTimeout(ctx, 1*time.Millisecond)
-	_, err := dh.Do(ctx, stall)
-	assert.Equal(t, "context deadline exceeded", err.Error())
-
-	ctx = context.Background()
-	ctx, _ = context.WithTimeout(ctx, 1*time.Millisecond)
-	_, err = dh.Do(ctx, stall)
-	assert.Equal(t, "context deadline exceeded", err.Error())
-
-	// refuses to dial until other calls to stall return (max of 2 pending)
-	ctx = context.Background()
-	ctx, _ = context.WithTimeout(ctx, 1*time.Millisecond)
-	_, err = dh.Do(ctx, stall)
-	assert.Equal(t, "maximum pending dials reached: context deadline exceeded", err.Error())
-
-	// wait for the pending dials to return
-	time.Sleep(1 * time.Second)
-
-	// can dial again
-	ctx = context.Background()
-	ctx, _ = context.WithTimeout(ctx, 1*time.Millisecond)
-	_, err = dh.Do(ctx, stall)
-	assert.Equal(t, "context deadline exceeded", err.Error())
 }
 
 func TestDeadlineErrorShapes(t *testing.T) {

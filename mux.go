@@ -25,12 +25,11 @@ type smuxContext struct {
 }
 
 type smuxClient struct {
-	closed       uint64
-	muClose      sync.RWMutex
-	wrapped      *client
-	config       *smux.Config
-	chCurSession chan *smuxContext
-	chSessionReq chan struct{}
+	closed      uint64
+	muClose     sync.RWMutex
+	wrapped     *client
+	config      *smux.Config
+	chStreamReq chan streamReq
 }
 
 type smuxConn struct {
@@ -83,121 +82,121 @@ func wrapClientSmux(c *client, opts *ClientOpts) Client {
 		cfg.MaxReceiveBuffer = opts.MaxReceiveBuffer
 	}
 
-	sc := &smuxClient{
-		wrapped:      c,
-		config:       cfg,
-		chSessionReq: make(chan struct{}),
-		// there's at most one live session any time, but have to use buffered
-		// channel as otherwise the goroutine putting session back would block
-		// if there's no one else receiving from the channel.
-		chCurSession: make(chan *smuxContext, 1),
+	var maxDials int64 = defaultMaxPendingDials
+	if opts.MaxPendingDials > 0 {
+		maxDials = opts.MaxPendingDials
 	}
-	go sc.sessionLoop()
-	sc.chSessionReq <- struct{}{}
+	sc := &smuxClient{
+		wrapped:     c,
+		config:      cfg,
+		chStreamReq: make(chan streamReq, maxDials),
+	}
+	go sc.dialLoop()
 	return sc
 }
 
-func (c *smuxClient) sessionLoop() {
-	minRetryInterval := time.NewTimer(0)
-	for range c.chSessionReq {
-		for {
-			minRetryInterval.Reset(randomize(10 * time.Second))
-			session, conn, err := c.newSession()
-			if err != nil {
-				<-minRetryInterval.C
+type streamResult struct {
+	conn *smuxConn
+	err  error
+}
+
+type streamReq struct {
+	ch  chan streamResult
+	ctx context.Context
+}
+
+func (c *smuxClient) dialLoop() {
+	chSessionReq := make(chan struct{})
+	defer close(chSessionReq)
+	chSession := make(chan *smuxContext)
+	var curSession *smuxContext
+
+	go func() {
+		minRetryInterval := time.NewTimer(0)
+		for range chSessionReq {
+			for i := 2; ; i++ {
+				if i > 60 {
+					i = 60
+				}
+				minRetryInterval.Reset(randomize(time.Duration(i) * time.Second))
+				ses, err := c.newSession()
+				if err != nil {
+					<-minRetryInterval.C
+					continue
+				}
+				chSession <- ses
+				break
+			}
+		}
+	}()
+	chSessionReq <- struct{}{}
+
+	for req := range c.chStreamReq {
+		if c.isClosed() {
+			req.ch <- streamResult{nil, ErrClientClosed}
+			continue
+		}
+		if curSession == nil {
+			select {
+			case curSession = <-chSession:
+			case <-req.ctx.Done():
+				req.ch <- streamResult{nil, req.ctx.Err()}
 				continue
 			}
-			if c.isClosed() {
-				conn.Close()
-				return
-			}
-			c.chCurSession <- &smuxContext{session, conn}
-			break
+		}
+		stream, err := curSession.session.OpenStream()
+		if err != nil {
+			curSession = nil
+			chSessionReq <- struct{}{}
+			req.ch <- streamResult{nil, err}
+		} else {
+			req.ch <- streamResult{&smuxConn{stream, curSession.conn}, nil}
 		}
 	}
 }
 
-func (c *smuxClient) newSession() (*smux.Session, net.Conn, error) {
+func (c *smuxClient) newSession() (*smuxContext, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dialSessionTimeout)
 	defer cancel()
-	conn, err := c.wrapped.dialContext(ctx)
+	conn, err := c.wrapped.DialContext(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	session, err := smux.Client(conn, c.config)
 	err = translateSmuxErr(err)
 	if err != nil {
 		conn.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	return session, conn, nil
+	return &smuxContext{session, conn}, nil
 }
 
 // implements Client.DialContext
 func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
-	return c.wrapped.dialOrDie.Do(ctx, c.dialContext)
-}
-
-func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
+	// prevent writing to c.chStreamReq after channel closed
+	c.muClose.RLock()
 	if c.isClosed() {
+		c.muClose.RUnlock()
 		return nil, ErrClientClosed
 	}
-	session, sconn, err := c.curSession(ctx)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := session.OpenStream()
-	if err != nil {
-		session.Close()
-		c.requestNewSession()
-		return nil, translateSmuxErr(err)
-	}
-	return &smuxConn{conn, sconn}, nil
-}
-
-func (c *smuxClient) requestNewSession() {
-	// prevent writing to c.chSessionReq after channel closed
-	c.muClose.RLock()
-	if !c.isClosed() {
-		select {
-		case c.chSessionReq <- struct{}{}:
-		default:
-		}
+	ch := make(chan streamResult)
+	select {
+	case c.chStreamReq <- streamReq{ch, ctx}:
+	default:
+		return nil, errors.New("maximum pending dials reached")
 	}
 	c.muClose.RUnlock()
+	res := <-ch
+	return res.conn, res.err
 }
 
 // implements Client.Close
 func (c *smuxClient) Close() error {
 	c.muClose.Lock()
 	atomic.StoreUint64(&c.closed, 1)
-	close(c.chSessionReq)
+	close(c.chStreamReq)
 	c.muClose.Unlock()
-
-	// when dialing is in progress, the session may not be in the channel,
-	// hence unable to be closed, but the chance is low.
-	select {
-	case ses := <-c.chCurSession:
-		ses.session.Close()
-	default:
-	}
 	return nil
-}
-
-func (c *smuxClient) curSession(ctx context.Context) (*smux.Session, net.Conn, error) {
-	for {
-		select {
-		case ses := <-c.chCurSession:
-			if ses.session.IsClosed() {
-				// drop the current session and wait for the next available
-				continue
-			}
-			c.chCurSession <- ses
-			return ses.session, ses.conn, nil
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		}
-	}
 }
 
 func (c *smuxClient) isClosed() bool {

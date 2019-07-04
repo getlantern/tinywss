@@ -112,16 +112,16 @@ func (c *smuxClient) dialLoop() {
 	var curSession *smuxContext
 
 	go func() {
-		minRetryInterval := time.NewTimer(0)
+		retry := time.NewTimer(0)
 		for range chSessionReq {
 			for i := 2; ; i++ {
 				if i > 60 {
 					i = 60
 				}
-				minRetryInterval.Reset(randomize(time.Duration(i) * time.Second))
+				retry.Reset(randomize(time.Duration(i) * time.Second))
 				ses, err := c.newSession()
 				if err != nil {
-					<-minRetryInterval.C
+					<-retry.C
 					continue
 				}
 				chSession <- ses

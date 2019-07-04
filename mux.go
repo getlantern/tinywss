@@ -153,6 +153,9 @@ func (c *smuxClient) dialLoop() {
 			req.ch <- streamResult{&smuxConn{stream, curSession.conn}, nil}
 		}
 	}
+	if curSession != nil {
+		curSession.session.Close()
+	}
 }
 
 func (c *smuxClient) newSession() (*smuxContext, error) {

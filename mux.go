@@ -112,22 +112,14 @@ func (c *smuxClient) dialLoop() {
 	var curSession *smuxContext
 
 	go func() {
-		retry := time.NewTimer(0)
 		for range chSessionReq {
-			for i := 2; ; i++ {
-				if i > 60 {
-					i = 60
-				}
-				retry.Reset(randomize(time.Duration(i) * time.Second))
-				ses, err := c.newSession()
-				if err != nil {
-					<-retry.C
-					continue
-				}
-				chSession <- ses
-				break
+			ses, err := c.newSession()
+			if err != nil {
+				continue
 			}
+			chSession <- ses
 		}
+		close(chSession)
 	}()
 	chSessionReq <- struct{}{}
 
@@ -138,6 +130,10 @@ func (c *smuxClient) dialLoop() {
 		}
 		if curSession == nil {
 			select {
+			case chSessionReq <- struct{}{}:
+			default:
+			}
+			select {
 			case curSession = <-chSession:
 			case <-req.ctx.Done():
 				req.ch <- streamResult{nil, req.ctx.Err()}
@@ -147,7 +143,6 @@ func (c *smuxClient) dialLoop() {
 		stream, err := curSession.session.OpenStream()
 		if err != nil {
 			curSession = nil
-			chSessionReq <- struct{}{}
 			req.ch <- streamResult{nil, err}
 		} else {
 			req.ch <- streamResult{&smuxConn{stream, curSession.conn}, nil}

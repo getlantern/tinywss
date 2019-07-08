@@ -3,7 +3,6 @@ package tinywss
 import (
 	"context"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +16,6 @@ import (
 var _ Client = &smuxClient{}
 
 var (
-	nullCtx    = &smuxContext{}
 	errTimeout = &timeoutError{}
 )
 
@@ -27,12 +25,11 @@ type smuxContext struct {
 }
 
 type smuxClient struct {
-	closed   uint64
-	ctx      atomic.Value
-	wrapped  *client
-	config   *smux.Config
-	mx       sync.Mutex
-	createMx sync.Mutex
+	closed      uint64
+	muClose     sync.RWMutex
+	wrapped     *client
+	config      *smux.Config
+	chStreamReq chan streamReq
 }
 
 type smuxConn struct {
@@ -85,122 +82,123 @@ func wrapClientSmux(c *client, opts *ClientOpts) Client {
 		cfg.MaxReceiveBuffer = opts.MaxReceiveBuffer
 	}
 
-	return &smuxClient{
-		wrapped: c,
-		config:  cfg,
+	var maxDials int64 = defaultMaxPendingDials
+	if opts.MaxPendingDials > 0 {
+		maxDials = opts.MaxPendingDials
 	}
+	sc := &smuxClient{
+		wrapped:     c,
+		config:      cfg,
+		chStreamReq: make(chan streamReq, maxDials),
+	}
+	go sc.dialLoop()
+	return sc
 }
 
-// implements Client.DialContext
-func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
-	return c.wrapped.dialOrDie.Do(ctx, c.dialContext)
+type streamResult struct {
+	conn *smuxConn
+	err  error
 }
 
-func (c *smuxClient) dialContext(ctx context.Context) (net.Conn, error) {
-	var err error
-	var session *smux.Session
-	var conn, sconn net.Conn
+type streamReq struct {
+	ch  chan streamResult
+	ctx context.Context
+}
 
-	for tries := 0; tries < 2; tries++ {
-		session, sconn, err = c.getOrCreateSession(ctx)
-		if err != nil {
+func (c *smuxClient) dialLoop() {
+	chSessionReq := make(chan struct{})
+	defer close(chSessionReq)
+	chSession := make(chan *smuxContext)
+	var curSession *smuxContext
+
+	go func() {
+		for range chSessionReq {
+			ses, err := c.newSession()
+			if err != nil {
+				continue
+			}
+			chSession <- ses
+		}
+		close(chSession)
+	}()
+	chSessionReq <- struct{}{}
+
+	for req := range c.chStreamReq {
+		if c.isClosed() {
+			req.ch <- streamResult{nil, ErrClientClosed}
 			continue
 		}
-
-		conn, err = session.OpenStream()
-		err = translateSmuxErr(err)
-		if err == nil {
-			return &smuxConn{conn, sconn}, nil
+		if curSession == nil {
+			select {
+			case chSessionReq <- struct{}{}:
+			default:
+			}
+			select {
+			case curSession = <-chSession:
+			case <-req.ctx.Done():
+				req.ch <- streamResult{nil, req.ctx.Err()}
+				continue
+			}
+		}
+		stream, err := curSession.session.OpenStream()
+		if err != nil {
+			curSession = nil
+			req.ch <- streamResult{nil, err}
 		} else {
-			c.sessionError(session, err)
+			req.ch <- streamResult{&smuxConn{stream, curSession.conn}, nil}
 		}
 	}
-	return nil, err
+	if curSession != nil {
+		curSession.session.Close()
+	}
 }
 
-func (c *smuxClient) getOrCreateSession(ctx context.Context) (*smux.Session, net.Conn, error) {
-	c.createMx.Lock()
-	defer c.createMx.Unlock()
-
-	if c.isClosed() {
-		return nil, nil, ErrClientClosed
-	}
-	session, conn := c.curSession()
-	if session != nil {
-		return session, conn, nil
-	}
-
-	session, conn, err := c.connect(ctx)
+func (c *smuxClient) newSession() (*smuxContext, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dialSessionTimeout)
+	defer cancel()
+	conn, err := c.wrapped.DialContext(ctx)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	return c.storeSession(session, conn)
-}
-
-func (c *smuxClient) sessionError(session *smux.Session, err error) {
-	c.mx.Lock()
-	cur, _ := c.curSession()
-	if session == cur {
-		c.ctx.Store(nullCtx)
-	}
-	c.mx.Unlock()
-	session.Close()
-}
-
-func (c *smuxClient) storeSession(session *smux.Session, conn net.Conn) (*smux.Session, net.Conn, error) {
-	c.mx.Lock()
-	defer c.mx.Unlock()
-	if c.isClosed() {
-		session.Close()
-		return nil, nil, ErrClientClosed
-	}
-	c.ctx.Store(&smuxContext{session, conn})
-	return session, conn, nil
-}
-
-// implements Client.Close
-func (c *smuxClient) Close() error {
-	c.mx.Lock()
-	atomic.StoreUint64(&c.closed, 1)
-	c.mx.Unlock()
-
-	session, _ := c.curSession()
-	if session != nil {
-		return session.Close()
-	}
-	return nil
-}
-
-func (c *smuxClient) curSession() (*smux.Session, net.Conn) {
-	s, _ := c.ctx.Load().(*smuxContext)
-	if s == nullCtx || s == nil {
-		return nil, nil
-	}
-	return s.session, s.conn
-}
-
-func (c *smuxClient) isClosed() bool {
-	return atomic.LoadUint64(&c.closed) == 1
-}
-
-// implements Client.SetHeaders
-func (c *smuxClient) SetHeaders(h http.Header) {
-	c.wrapped.SetHeaders(h)
-}
-
-func (c *smuxClient) connect(ctx context.Context) (*smux.Session, net.Conn, error) {
-	conn, err := c.wrapped.dialContext(ctx)
-	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	session, err := smux.Client(conn, c.config)
 	err = translateSmuxErr(err)
 	if err != nil {
-		c.Close()
-		return nil, nil, err
+		conn.Close()
+		return nil, err
 	}
-	return session, conn, nil
+	return &smuxContext{session, conn}, nil
+}
+
+// implements Client.DialContext
+func (c *smuxClient) DialContext(ctx context.Context) (net.Conn, error) {
+	// prevent writing to c.chStreamReq after channel closed
+	c.muClose.RLock()
+	if c.isClosed() {
+		c.muClose.RUnlock()
+		return nil, ErrClientClosed
+	}
+	ch := make(chan streamResult)
+	select {
+	case c.chStreamReq <- streamReq{ch, ctx}:
+	default:
+		return nil, errors.New("maximum pending dials reached")
+	}
+	c.muClose.RUnlock()
+	res := <-ch
+	return res.conn, res.err
+}
+
+// implements Client.Close
+func (c *smuxClient) Close() error {
+	c.muClose.Lock()
+	atomic.StoreUint64(&c.closed, 1)
+	close(c.chStreamReq)
+	c.muClose.Unlock()
+	return nil
+}
+
+func (c *smuxClient) isClosed() bool {
+	return atomic.LoadUint64(&c.closed) == 1
 }
 
 func translateSmuxErr(err error) error {
@@ -233,7 +231,6 @@ type smuxListener struct {
 	config                *smux.Config
 	numConnections        int64
 	numVirtualConnections int64
-	mx                    sync.Mutex
 }
 
 func wrapListenerSmux(l *listener, opts *ListenOpts) (net.Listener, error) {
@@ -343,8 +340,6 @@ func (l *smuxListener) Accept() (net.Conn, error) {
 
 // implements net.Listener.Close
 func (l *smuxListener) Close() error {
-	l.mx.Lock()
-	defer l.mx.Unlock()
 	select {
 	case <-l.closed:
 		return nil

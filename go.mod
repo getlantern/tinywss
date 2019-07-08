@@ -18,6 +18,7 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pkg/errors v0.8.1
+	github.com/siddontang/go v0.0.0-20180604090527-bdc77568d726
 	github.com/stretchr/testify v1.3.0
 	github.com/xtaci/smux v1.3.3
 	golang.org/x/sync v0.0.0-20190423024810-112230192c58

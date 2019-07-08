@@ -26,6 +26,7 @@ var (
 	// ErrDialerClosed is the error returned if client is used after closed
 	ErrClientClosed         = errors.New("client closed")
 	log                     = golog.LoggerFor("tinywss")
+	dialSessionTimeout      = 1 * time.Minute
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultProtocols        = []string{ProtocolMux, ProtocolRaw}
 )
@@ -82,9 +83,6 @@ type Client interface {
 	// DialContext attempts to dial the configured server, returning an error if
 	// the context given expires before the server can be contacted.
 	DialContext(ctx context.Context) (net.Conn, error)
-
-	// SetHeaders sets additional custom headers sent on each HTTP connection
-	SetHeaders(header http.Header)
 
 	// Close shuts down any resources associated with the client
 	Close() error

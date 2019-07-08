@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -16,6 +15,7 @@ type ClientOpts struct {
 	URL             string
 	MaxPendingDials int64
 	RoundTrip       RoundTripHijacker
+	Headers         http.Header
 
 	// Multiplex Options
 	Multiplexed       bool
@@ -30,7 +30,6 @@ type client struct {
 	rt        RoundTripHijacker
 	headers   http.Header // Sent with each https connection
 	dialOrDie *dialHelper
-	mx        sync.Mutex
 }
 
 // NewClient constructs a new tinywss.Client with
@@ -44,8 +43,11 @@ func NewClient(opts *ClientOpts) Client {
 	c := &client{
 		url:       opts.URL,
 		rt:        rt,
-		headers:   make(http.Header, 0),
+		headers:   opts.Headers,
 		dialOrDie: newDialHelper(opts.MaxPendingDials),
+	}
+	if c.headers == nil {
+		c.headers = make(http.Header, 0)
 	}
 
 	if !opts.Multiplexed {
@@ -86,12 +88,6 @@ func (c *client) dialContext(ctx context.Context) (net.Conn, error) {
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
 	err = c.validateResponse(res, wskey, req.Header.Get("Sec-Websocket-Protocol"))
 	if err != nil {
 		return nil, err
@@ -111,9 +107,7 @@ func (c *client) createUpgradeRequest(wskey string) (*http.Request, error) {
 		return nil, err
 	}
 
-	c.mx.Lock()
 	hdr := cloneHeaders(c.headers)
-	c.mx.Unlock()
 
 	hdr.Set("Upgrade", "websocket")
 	hdr.Set("Connection", "Upgrade")
@@ -150,13 +144,6 @@ func (c *client) validateResponse(res *http.Response, wskey, protocol string) er
 	}
 
 	return nil
-}
-
-// implements Client.SetHeaders
-func (c *client) SetHeaders(h http.Header) {
-	c.mx.Lock()
-	copyHeaders(c.headers, h)
-	c.mx.Unlock()
 }
 
 // implements Client.Close
